@@ -11,6 +11,7 @@ from app.db.session import get_db
 from app.models.models import AddressBook, AddressBookEntry, EntryTag, Tag, User
 from app.schemas.rustdesk import LoginIn
 from app.services import ab as ab_svc
+from app.services import presence as presence_svc
 from app.services.auth import authenticate, create_session, destroy_session, user_by_token
 
 router = APIRouter()
@@ -332,6 +333,23 @@ async def ab_tag_delete(guid: str, request: Request, user: User = Depends(curren
             db.delete(t)  # entry_tags cascade
     db.commit()
     return ok_empty()
+
+
+# --- device heartbeat (presence source, see PresenceService) ---
+
+@router.post("/api/heartbeat")
+async def heartbeat(request: Request, db: Session = Depends(get_db)):
+    """Unauthenticated by design: controlled devices post {"id","uuid","ver",...}
+    every 15s when a custom api-server is configured. We stamp last_seen on
+    matching entries and return {} (client only looks for sysinfo/disconnect keys)."""
+    try:
+        data = await request.json()
+    except Exception:
+        return {}
+    rid = str(data.get("id", "")) if isinstance(data, dict) else ""
+    if rid:
+        presence_svc.record_heartbeat(db, rid)
+    return {}
 
 
 # --- legacy stubs ---

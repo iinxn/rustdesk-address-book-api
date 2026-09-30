@@ -25,7 +25,8 @@ cp .env.example .env                  # и заполнить
 ```
 
 Проверка: `http://localhost:8000/health`, docs: `http://localhost:8000/docs`,
-панель: `http://localhost:8000/panel/devices`.
+новая панель: `http://localhost:8000/app/` (после `cd frontend && npm run build`),
+старая панель: `http://localhost:8000/panel/devices`. Детали: `docs/web-panel.md`.
 
 ## Первый администратор
 

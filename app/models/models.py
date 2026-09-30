@@ -96,6 +96,7 @@ class AddressBookEntry(Base):
     hash_value: Mapped[str] = mapped_column(String(255), default="")
     password_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     customer_id: Mapped[str | None] = mapped_column(ForeignKey("customers.id", ondelete="SET NULL"), nullable=True)
+    last_seen: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 

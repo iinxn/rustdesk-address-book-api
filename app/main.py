@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.api import panel, rustdesk, webapi
@@ -28,9 +29,17 @@ async def unauthorized_json(request: Request, exc):
 
 @app.get("/", include_in_schema=False)
 def root():
-    return RedirectResponse("/panel/devices", status_code=303)
+    return RedirectResponse("/app/", status_code=303)
 
 
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+# Modern SPA (frontend/dist). Mounted last so /api/* and /panel/* win.
+import os as _os
+
+_DIST = _os.path.join(_os.path.dirname(__file__), "..", "frontend", "dist")
+if _os.path.isdir(_DIST):
+    app.mount("/app", StaticFiles(directory=_DIST, html=True), name="spa")
