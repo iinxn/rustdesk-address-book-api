@@ -1,0 +1,8 @@
+{% extends "base.html" %}{% block title %}Tags{% endblock %}{% block body %}
+<h2>Tags</h2>
+<form method="get" action="/panel/tags"><select name="book" onchange="this.form.submit()">{% for b in books %}<option value="{{ b.id }}" {% if b.id==book %}selected{% endif %}>{{ b.name }}</option>{% endfor %}</select></form>
+<form method="post" action="/panel/tags/create"><input type="hidden" name="book" value="{{ book }}"><input name="name" placeholder="name" required><input name="color" value="0"><button>Add</button></form>
+{% for t in tags %}<div><b>{{ t.name }}</b> {{ t.devices }}
+<form method="post" action="/panel/tags/{{ t.id }}/update" style="display:inline"><input name="name" value="{{ t.name }}"><input name="color" value="{{ t.color }}"><button>Save</button></form>
+<form method="post" action="/panel/tags/{{ t.id }}/delete" style="display:inline"><button>Delete</button></form></div>{% endfor %}
+{% endblock %}

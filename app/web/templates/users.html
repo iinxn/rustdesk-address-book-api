@@ -1,0 +1,6 @@
+{% extends "base.html" %}{% block title %}Users{% endblock %}{% block body %}
+<h2>Users</h2>
+<form method="post" action="/panel/users/create"><input name="username" placeholder="username" required><input name="password" type="password" placeholder="password" required><label><input type="checkbox" name="is_admin" value="true"> admin</label><button>Add</button></form>
+{% for u in users %}<div>{{ u.username }} {% if u.is_admin %}[admin]{% endif %} {% if u.is_disabled %}[disabled]{% endif %}
+{% if u.id != user.id %}<form method="post" action="/panel/users/{{ u.id }}/delete" style="display:inline"><button>Delete</button></form>{% endif %}</div>{% endfor %}
+{% endblock %}

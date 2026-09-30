@@ -1,0 +1,6 @@
+{% extends "base.html" %}{% block title %}Customers{% endblock %}{% block body %}
+<h2>Customers</h2>
+<form method="post" action="/panel/customers/create"><input name="name" placeholder="name" required><input name="note" placeholder="note"><button>Add</button></form>
+{% for c in customers %}<div><b>{{ c.name }}</b> {{ c.note }}
+<form method="post" action="/panel/customers/{{ c.id }}/delete" style="display:inline"><button>Delete</button></form></div>{% endfor %}
+{% endblock %}
