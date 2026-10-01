@@ -111,7 +111,8 @@ def device_create(
     if b is None or not ab_svc.can_write(ab_svc.rule_for(db, user, b)):
         return RedirectResponse(f"/panel/devices?book={book}", status_code=303)
     rid = rustdesk_id.strip()
-    if rid and db.scalar(select(AddressBookEntry).where(AddressBookEntry.address_book_id == book, AddressBookEntry.rustdesk_id == rid)) is None:
+    from app.core.validators import validate_rustdesk_id
+    if validate_rustdesk_id(rid) is None and db.scalar(select(AddressBookEntry).where(AddressBookEntry.address_book_id == book, AddressBookEntry.rustdesk_id == rid)) is None:
         from app.core.crypto import encrypt_password
         e = AddressBookEntry(address_book_id=book, rustdesk_id=rid, alias=alias.strip(), note=note.strip(),
                              customer_id=customer_id or None,

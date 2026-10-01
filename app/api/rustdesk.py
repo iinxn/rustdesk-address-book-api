@@ -10,6 +10,7 @@ from app.core.config import settings
 from app.db.session import get_db
 from app.models.models import AddressBook, AddressBookEntry, EntryTag, Tag, User
 from app.schemas.rustdesk import LoginIn
+from app.core.validators import validate_rustdesk_id
 from app.services import ab as ab_svc
 from app.services import presence as presence_svc
 from app.services.auth import authenticate, create_session, destroy_session, user_by_token
@@ -146,8 +147,8 @@ async def ab_peer_add(guid: str, request: Request, user: User = Depends(current_
     except Exception:
         return err("bad json", 400)
     rid = str(data.get("id", "")).strip()
-    if not rid:
-        return err("missing id", 400)
+    if (rid_err := validate_rustdesk_id(rid)) is not None:
+        return err(rid_err, 422 if rid_err != "missing id" else 400)
     exists = db.scalar(
         select(AddressBookEntry).where(
             AddressBookEntry.address_book_id == book.id, AddressBookEntry.rustdesk_id == rid

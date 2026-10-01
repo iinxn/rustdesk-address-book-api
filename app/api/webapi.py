@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import current_user
 from app.core.crypto import encrypt_password
+from app.core.validators import validate_rustdesk_id
 from app.models.models import (
     AddressBook,
     AddressBookEntry,
@@ -164,6 +165,8 @@ def create_entry(bid: str, body: EntryIn, user: User = Depends(current_user), db
         return err("no such book", 404)
     if not ab_svc.can_write(ab_svc.rule_for(db, user, book)):
         return err("read-only", 403)
+    if (rid_err := validate_rustdesk_id(body.rustdesk_id)) is not None:
+        return err(rid_err, 422)
     if db.scalar(select(AddressBookEntry).where(AddressBookEntry.address_book_id == bid, AddressBookEntry.rustdesk_id == body.rustdesk_id)):
         return err("duplicate", 409)
     e = AddressBookEntry(
@@ -201,6 +204,8 @@ def update_entry(eid: str, body: EntryIn, user: User = Depends(current_user), db
     if body.password:
         e.password_encrypted = encrypt_password(body.password)
     if body.rustdesk_id != e.rustdesk_id:
+        if (rid_err := validate_rustdesk_id(body.rustdesk_id)) is not None:
+            return err(rid_err, 422)
         dup = db.scalar(select(AddressBookEntry).where(AddressBookEntry.address_book_id == e.address_book_id, AddressBookEntry.rustdesk_id == body.rustdesk_id))
         if dup is not None:
             return err("duplicate", 409)
