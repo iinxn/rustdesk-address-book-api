@@ -1,57 +1,57 @@
-# RustDesk Address Book Backend (MVP)
+# RustDesk Manager
 
-Собственный backend для Address Book RustDesk Server Pro. Обычный RustDesk Client
-работает без изменений. Детали протокола: `docs/rustdesk-api-analysis.md`.
+Единое приложение: **FastAPI** (Address Book API, совместимый с обычным
+RustDesk Client без его изменений) + **Web Panel** (React SPA + legacy `/panel`)
+
++ **KX Shim** (прокси secure-rendezvous 21116 → OSS hbbs). База — SQLite
+  `data/base.db`, миграции Alembic.
 
 ## Быстрый старт (Debian)
 
 ```bash
-cd /home/user/Documents/rustdesk-ab-backend
-python3 -m venv --without-pip .venv   # если .venv уже есть — пропустить
-.venv/bin/python /tmp/opencode/get-pip.py  # один раз (pip отсутствует в Debian python)
+python3 -m venv --without-pip .venv
+.venv/bin/python /tmp/get-pip.py        # Debian python без ensurepip
 .venv/bin/pip install -r requirements.txt
-
-# Вариант A: PostgreSQL через docker (когда доступен docker)
-docker compose up -d postgres
-export DATABASE_URL='postgresql+psycopg://rustdesk:rustdesk@localhost:5432/rustdesk_ab'
-
-# Вариант B: SQLite для разработки без docker/sudo (по умолчанию)
-export DATABASE_URL='sqlite:///./dev.db'
-
-.venv/bin/alembic upgrade head
-.venv/bin/python -m app.cli gen-key   # -> положить в .env как DEVICE_SECRET
-cp .env.example .env                  # и заполнить
-.venv/bin/uvicorn app.main:app --reload --port 8000
+cp .env.example .env                    # заполнить секреты (ниже)
+.venv/bin/python -m app.cli gen-key     # -> DEVICE_SECRET в .env
+./scripts/start.sh                      # одна команда: миграции + API + shim
 ```
 
-Проверка: `http://localhost:8000/health`, docs: `http://localhost:8000/docs`,
-новая панель: `http://localhost:8000/app/` (после `cd frontend && npm run build`),
-старая панель: `http://localhost:8000/panel/devices`. Детали: `docs/web-panel.md`.
-
-## Первый администратор
+`.env` минимум:
 
 ```bash
-.venv/bin/python -m app.cli create-admin
-# спросит username + password
+DEVICE_SECRET='<gen-key>'
+WEB_SECRET='<openssl rand -hex 32>'
+# SHIM_ENABLED=1 + SHIM_ID_KEY=/abs/path/id_ed25519  — для шима
 ```
+
+Проверка: `http://localhost:8000/health/ready`, панель `http://localhost:8000/app/`,
+API `http://localhost:8000/docs`. Первый админ: `.venv/bin/python -m app.cli create-admin`.
+
+## RustDesk Client
+
+API Server: `http://<ip>:8000` (или https через reverse proxy — см.
+`docs/deployment-debian.md`). ID/Relay Server + Key — как раньше.
+
+## Документы
+
+- `docs/architecture.md` — схема, порты, потоки.
+- `docs/threat-model.md` — модель угроз и принятые риски.
+- `docs/security-audit.md` — аудит: находки, исправления, проверки.
+- `docs/deployment-debian.md` — установка, systemd, HTTPS, обновление.
+- `docs/backup-restore.md` — бэкап/восстановление.
+- `docs/connection-diagnostic.md`, `docs/kx-shim-spec.md` — диагностика
+  `Failed to secure tcp` и протокол шима.
+- `docs/rustdesk-api-analysis.md`, `docs/web-panel.md` — контракт API и панель.
 
 ## Тесты
 
 ```bash
-.venv/bin/pytest -q
+.venv/bin/pytest -q        # вся сюита, включая security-тесты
 ```
 
-## Настройка RustDesk Client
+## Скрипты
 
-`Settings -> Network -> API server / Sync address book`: `http://<ip-debian>:8000`.
-Логин в клиенте — username/password из `create-admin`.
-
-## Переменные (.env)
-
-| Var                 | Default                | Назначение                                                           |
-| ------------------- | ---------------------- | ------------------------------------------------------------------------------ |
-| `DATABASE_URL`    | `sqlite:///./dev.db` | postgres:`postgresql+psycopg://rustdesk:rustdesk@localhost:5432/rustdesk_ab` |
-| `DEVICE_SECRET`   | (пусто=ephemeral) | Fernet-ключ (`cli gen-key`) для `password_encrypted`                |
-| `WEB_SECRET`      | dev-default            | cookie-секрет панели                                               |
-| `SESSION_DAYS`    | 30                     | срок токена                                                          |
-| `MAX_PEER_ONE_AB` | 0                      | лимит устройств (0=без лимита)                          |
+- `scripts/start.sh` / `scripts/stop.sh` — запуск/остановка.
+- `.venv/bin/python -m app.cli backup [--dest ...]` — консистентный бэкап.
+- `.venv/bin/python -m app.cli dump-book <guid>` — redacted-дамп книги.

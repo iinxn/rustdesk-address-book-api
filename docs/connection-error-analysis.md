@@ -200,5 +200,20 @@ characters are rejected with 422 on all entry-create/update paths.
   require a Windows client + hbbs/hbbr and are recorded here as the manual QA
   checklist; §25 fork result decides Variant A vs B.
 
+## HTTPS API (stand 2026-10-01, `rustdesk-diagnostic/`)
+
+TLS terminates at Caddy in front of FastAPI (`https://localhost:8443`,
+TLS 1.3, local CA verified `ok`); `http://localhost:8080` kept only for
+comparison. Proven by `check_proxy_parity.py`: login/personal/peers payloads
+byte-identical across direct/http/https, `Authorization: Bearer` passes
+through untouched, bogus token → 401 on all paths.
+
+## HTTP vs HTTPS Comparison
+
+No difference in the secure-tcp outcome: the failing stage is client↔hbbs,
+which neither scheme touches. HTTPS protects client↔API (passwords, tokens
+— previously plaintext); it neither fixes nor worsens rendezvous. Full
+6-cell table + evidence: `rustdesk-diagnostic/docs/connection-diagnostic.md`.
+
 Safe debug representation (§9): log peer responses only with
 `password/hash/token` redacted; this repo never logs them (see `app/core/logging.py`).

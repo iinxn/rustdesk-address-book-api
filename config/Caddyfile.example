@@ -1,0 +1,15 @@
+# Diagnostic reverse proxy: HTTPS termination + plain-HTTP compare endpoint.
+# Ports >1024 so no root is needed. No production hardening here.
+{
+	admin off
+	auto_https off
+}
+
+https://localhost:8443 {
+	tls /home/user/Documents/rustdesk-diagnostic/certs/server.crt /home/user/Documents/rustdesk-diagnostic/certs/server.key
+	reverse_proxy 127.0.0.1:8000
+}
+
+http://localhost:8080 {
+	reverse_proxy 127.0.0.1:8000
+}

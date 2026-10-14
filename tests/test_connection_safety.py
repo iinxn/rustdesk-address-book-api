@@ -91,3 +91,22 @@ def test_personal_hash_roundtrip_identical(client, user):
     assert r.status_code == 200
     data = client.post(f"/api/ab/peers?current=1&pageSize=100&ab={guid}", headers=h).json()["data"]
     assert data[0]["hash"] == hv
+
+
+def test_api_payloads_are_scheme_agnostic(client, user):
+    """Responses must carry no absolute http(s) URLs / localhost literals, so
+    direct HTTP, proxied HTTP and HTTPS all behave identically (§14, §15)."""
+    h, guid = user["headers"], user["guid"]
+    client.post(f"/api/ab/peer/add/{guid}", headers=h,
+                json={"id": "123456789", "alias": "A", "tags": []})
+    bodies = [
+        client.post("/api/login", json={"username": "tester", "password": "secret123", "type": "account"}).text,
+        client.post(f"/api/ab/peers?current=1&pageSize=100&ab={guid}", headers=h).text,
+        client.post(f"/api/ab/tags/{guid}", headers=h).text,
+        client.get("/openapi.json").text,
+    ]
+    for b in bodies:
+        low = b.lower()
+        assert "http://" not in low, b[:200]
+        assert "ws://" not in low
+        assert "localhost" not in low

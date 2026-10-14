@@ -1,0 +1,23 @@
+[Unit]
+Description=RustDesk Manager (Address Book API + Web Panel + KX shim)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rustdesk
+Group=rustdesk
+WorkingDirectory=/opt/rustdesk-manager
+EnvironmentFile=/opt/rustdesk-manager/.env
+ExecStart=/opt/rustdesk-manager/.venv/bin/python -m app
+Restart=on-failure
+RestartSec=5
+# allow binding 21116/8000 as non-root; no extra caps needed (ports >1024)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/rustdesk-manager/data /opt/rustdesk-manager/logs
+
+[Install]
+WantedBy=multi-user.target

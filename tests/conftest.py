@@ -1,5 +1,14 @@
 import os
 
+# Test-only secrets, set before any app import (config fail-fast otherwise).
+os.environ.setdefault("DEVICE_SECRET", "MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=")
+os.environ.setdefault("WEB_SECRET", "test-only-web-secret-0123456789abcdef")
+os.environ.setdefault("DATABASE_URL", "sqlite:///./test.db")
+# Suite-wide: many logins per minute from one test IP; the limiter itself is
+# covered by tests/test_ratelimit.py with temporarily lowered thresholds.
+os.environ.setdefault("LOGIN_PER_MINUTE_PER_IP", "1000")
+os.environ.setdefault("HEARTBEAT_PER_MINUTE_PER_IP", "100000")
+
 import pytest
 from fastapi.testclient import TestClient
 
