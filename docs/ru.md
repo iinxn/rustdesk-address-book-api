@@ -157,8 +157,8 @@ heartbeat/health, требуют валидный токен; в протоко�
 Состав репо: `app/` (FastAPI: `main.py`, `__main__.py`, `api/`, `core/`,
 `models/`, `schemas/`, `services/`, `db/`, `cli.py`, `shim/`,
 `shim_supervisor.py`, `web/templates/`), `frontend/` (`src/`, собранный
-`dist/`), `alembic/`, `tests/`, `scripts/` (`start.sh`/`stop.sh` плюс
-`repro_handshake.py`, `check_keys.py`, `test_kx_shim.py`), `config/`
+`dist/`), `alembic/`, `scripts/` (`start.sh`/`stop.sh` плюс
+`repro_handshake.py`, `check_keys.py`), `config/`
 (примеры Caddy/systemd), `data/` + `logs/` (рантайм).
 
 ## 4. Конфигурация
@@ -273,7 +273,7 @@ create/update/delete form-posts; без входа → `303 /panel/login`.
 crash loop → `down` + `503` на ready после 5 падений за 10 мин (бэкофф
 1,2,4,8,16,30,60 с), API продолжает работать; `/health/ready` — единственный
 источник статуса. Автономный диагностический режим — в `scripts/`
-(`repro_handshake.py`, `check_keys.py` — только хэши, `test_kx_shim.py`).
+(`repro_handshake.py`, `check_keys.py` — только хэши).
 
 Что канал даёт, а что нет (доказано, не предполагается): плечо клиент↔шим
 шифруется secretbox на ключе соединения, запечатанном под шим; открытым
@@ -285,12 +285,9 @@ rendezvous-порту (её нет в самом протоколе) — сде�
 
 ## 7. Безопасность
 
-Обеспечивается кодом и покрыто тестами (`test_security.py`,
-`test_ratelimit.py`, `test_shim.py`, `test_connection_safety.py`):
-только bcrypt-пароли; серверные сессии с отзывом при logout; проверка
-владения/ролей книг при каждом запросе (IDOR-тесты вторым пользователем);
-недоверие присланным ролям/владельцам (mass-assignment тест); ORM +
-bound-параметры + whitelist sort (SQLi протестированы); `data/` `0700`,
+Обеспечивается кодом: только bcrypt-пароли; серверные сессии с отзывом при
+logout; проверка владения/ролей книг при каждом запросе; недоверие присланным
+ролям/владельцам; ORM + bound-параметры + whitelist sort; `data/` `0700`,
 БД/бэкапы `0600` на старте; Fernet-пароли устройств, секретов в логах нет
 (шим — только отпечатки); нет CORS-middleware (same-origin SPA);
 `X-Forwarded-*` не читаются; в React нет `dangerouslySetInnerHTML`, в Jinja
@@ -307,18 +304,14 @@ per-form CSRF (только SameSite=Lax); дефолтный `SESSION_DAYS=30` 
 
 Окружение = установка из §2 + для UI `cd frontend && npm install` (Node.js 22);
 dev-сервер фронта (`npm run dev`) проксирует `/api` на `127.0.0.1:8000`,
-`npm run build` пишет `frontend/dist/` на `/app/`. Тесты:
-`.venv/bin/pytest -q` — изоляция в `test.db` через `tests/conftest.py`+
-`tests/db.py`, `data/base.db` не трогается. Покрытие: auth, контракт RustDesk,
-presence, валидация ID, connection-safety, rate limits, cap тел, FK/pragma,
-стабильность путей, auth панели, IDOR, юнит-крипто/гейты шима. Скрипты с живым
-сервером в `scripts/` — ручные инструменты (нужен запущенный `hbbs`), не CI.
-Правило: сначала тест, держать зелёным, коммитов в remote нет.
+`npm run build` пишет `frontend/dist/` на `/app/`. Проверка вручную:
+`/health/ready`, login + `/api/ab/personal` из §2, скрипты с живым сервером
+в `scripts/` (нужен запущенный `hbbs`). Коммитов в remote нет.
 
 Состав: `app/` (FastAPI: `main.py`, `__main__.py`, `api/`, `core/`, `models/`,
 `schemas/`, `services/`, `db/`, `cli.py`, `shim/`, `shim_supervisor.py`,
 `web/templates/`), `frontend/` (`src/`, собранный `dist/`), `alembic/`
-(0001_init, 0002_last_seen), `tests/`, `scripts/` (`start.sh`/`stop.sh` + …),
+(0001_init, 0002_last_seen), `scripts/` (`start.sh`/`stop.sh` + …),
 `config/` (примеры Caddy/systemd), `data/` + `logs/` (рантайм).
 
 ## 9. Troubleshooting

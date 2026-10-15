@@ -196,8 +196,6 @@ or passwords — use obvious placeholders.
   instead of `Failed to secure tcp`. Logged-out clients show
   `plain passthrough`.
 - Minimal request: the `/api/login` + `/api/ab/personal` calls from Quick start.
-- Regression suite: `.venv/bin/pytest -q` (auth, IDOR, rate limits, shim
-  crypto units, RustDesk contract tests).
 
 ## Troubleshooting
 

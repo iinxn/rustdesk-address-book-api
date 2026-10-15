@@ -159,8 +159,8 @@ mediation; it never sees API credentials.
 Repo layout: `app/` (FastAPI: `main.py`, `__main__.py`, `api/`, `core/`,
 `models/`, `schemas/`, `services/`, `db/`, `cli.py`, `shim/`,
 `shim_supervisor.py`, `web/templates/`), `frontend/` (`src/`, prebuilt
-`dist/`), `alembic/`, `tests/`, `scripts/` (`start.sh`/`stop.sh` plus
-`repro_handshake.py`, `check_keys.py`, `test_kx_shim.py`), `config/`
+`dist/`), `alembic/`, `scripts/` (`start.sh`/`stop.sh` plus
+`repro_handshake.py`, `check_keys.py`), `config/`
 (Caddy/systemd examples), `data/` + `logs/` (runtime state).
 
 ## 4. Configuration
@@ -276,7 +276,7 @@ first frame means plain passthrough (plain clients ignore our KX via their
 10 s with a warning; crash loop → `down` + `503` on ready after 5 crashes in
 10 min (backoff 1,2,4,8,16,30,60 s), API keeps serving; `/health/ready` is the
 single status source. Standalone diagnostics mode exists in `scripts/`
-(`repro_handshake.py`, `check_keys.py` — hashes only, `test_kx_shim.py`).
+(`repro_handshake.py`, `check_keys.py` — hashes only).
 
 What the channel does and does not do (proven, not assumed): the client↔shim
 leg is secretbox-encrypted with a per-connection sealed key; plaintext exists
@@ -287,17 +287,14 @@ stays between the two RustDesk endpoints; the shim never sees it.
 
 ## 7. Security
 
-Enforced in code and covered by tests (`test_security.py`,
-`test_ratelimit.py`, `test_shim.py`, `test_connection_safety.py`):
-bcrypt-only passwords; server-side sessions with logout revocation; per-request
-book ownership/rule checks (second-user IDOR tests); no trust in client-sent
-roles/owners (mass-assignment test); ORM + bound params + whitelisted sort
-(SQLi-tested); `data/` `0700`, DB/backups `0600` enforced at startup;
-Fernet device passwords, no secrets in logs (shim: fingerprints only);
-no CORS middleware (same-origin SPA); no `X-Forwarded-*` reads; React without
-`dangerouslySetInnerHTML`, Jinja autoescape on; error responses carry no
-traces/paths/SQL. Dependency labels at last check: `pip-audit` clean,
-`bandit` 0 High, `npm audit` 0 vulnerabilities.
+Enforced in code: bcrypt-only passwords; server-side sessions with logout
+revocation; per-request book ownership/rule checks; no trust in client-sent
+roles/owners; ORM + bound params + whitelisted sort; `data/` `0700`,
+DB/backups `0600` enforced at startup; Fernet device passwords, no secrets
+in logs (shim: fingerprints only); no CORS middleware (same-origin SPA);
+no `X-Forwarded-*` reads; React without `dangerouslySetInnerHTML`, Jinja
+autoescape on; error responses carry no traces/paths/SQL. Dependency labels
+at last check: `pip-audit` clean, `bandit` 0 High, `npm audit` 0 vulnerabilities.
 
 Known accepted limits: unauthenticated heartbeat can skew presence within its
 rate limit; customers are global; legacy panel has SameSite=Lax but no
@@ -309,13 +306,9 @@ beyond loopback.
 
 Dev env = install in §2 + `cd frontend && npm install` (Node.js 22) for UI work;
 frontend dev server proxies `/api` to `127.0.0.1:8000`, `npm run build` writes
-`frontend/dist/` served at `/app/`. Tests: `.venv/bin/pytest -q` — isolated
-into `test.db` via `tests/conftest.py`+`tests/db.py`, never touches
-`data/base.db`; coverage: auth, RustDesk contract, presence, ID validation,
-connection-safety, rate limits, body cap, FK/pragma, path stability, panel
-auth, IDOR, shim units/gates. Live-server scripts in `scripts/` are manual
-tools (need a running `hbbs`), not CI. Change rule: test first, keep green,
-no remote commits.
+`frontend/dist/` served at `/app/`. Verification is manual: `/health/ready`,
+the login + `/api/ab/personal` calls from §2, and the live-server scripts in
+`scripts/` (need a running `hbbs`). No remote commits.
 
 ## 9. Troubleshooting
 
