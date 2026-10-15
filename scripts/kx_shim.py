@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """KX shim: speaks the Pro-style rendezvous KeyExchange (v0) to 1.4.x clients,
-proxies decrypted traffic to a real OSS hbbs. Spec: docs/kx-shim-spec.md.
+proxies decrypted traffic to a real OSS hbbs. Spec: docs/en.md §6.
 
   clients (21116) --> shim --> hbbs (127.0.0.1:21166, run with -p 21166)
 

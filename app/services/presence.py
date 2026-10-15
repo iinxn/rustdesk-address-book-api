@@ -1,6 +1,6 @@
 """PresenceService: honest online/last_seen, no fakes.
 
-Real data flow (see docs/rustdesk-api-analysis.md §presence):
+Real data flow (see docs/en.md §5):
 - RustDesk *online* state lives on the rendezvous server (client asks hbbs
   via `query_online_states`, never the API server). We cannot see it.
 - What the API server CAN see: controlled devices POST `/api/heartbeat`

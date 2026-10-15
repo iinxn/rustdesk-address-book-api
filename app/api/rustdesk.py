@@ -1,5 +1,5 @@
 """RustDesk Client compatibility API. Mirrors Server Pro shapes from
-docs/rustdesk-api-analysis.md. Error shape is always {"error": msg}."""
+docs/en.md §5. Error shape is always {"error": msg}."""
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy import func, select

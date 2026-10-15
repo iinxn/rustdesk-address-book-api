@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """KX shim: speaks the Pro-style rendezvous KeyExchange (v0) to 1.4.x clients,
-proxies decrypted traffic to a real OSS hbbs. Spec: docs/kx-shim-spec.md.
+proxies decrypted traffic to a real OSS hbbs. Spec: docs/en.md §6.
 
 Hardened for external exposure (21116 WILL face the general network):
 - frame size cap (2MB), read timeouts everywhere (no slow-loris hold),

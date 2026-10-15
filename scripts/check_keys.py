@@ -9,7 +9,7 @@ Prints SHA256 fingerprints (never private keys). Match => punch stage passes
 key check; mismatch => punch fails with LICENSE_MISMATCH (failure=3).
 NOTE: key match does NOT fix the logged-in path against OSS hbbs — the
 secure_tcp stage fails earlier (server never sends KeyExchange). See
-docs/connection-diagnostic.md.
+docs/en.md §10.
 """
 import argparse
 import base64
