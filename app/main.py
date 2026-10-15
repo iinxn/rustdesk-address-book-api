@@ -30,7 +30,8 @@ async def lifespan(app: FastAPI):
         supervisor = ShimSupervisor(
             listen=settings.shim_listen, upstream=settings.shim_upstream,
             id_key=settings.shim_id_key, max_conns=settings.shim_max_conns,
-            per_ip_per_min=settings.shim_per_ip_per_min)
+            per_ip_per_min=settings.shim_per_ip_per_min,
+            diag_msgtypes=settings.shim_diag_msgtypes == "1")
         supervisor.start()
 
         async def _watch():

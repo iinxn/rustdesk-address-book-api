@@ -15,12 +15,13 @@ BACKOFFS = (1, 2, 4, 8, 16, 30, 60)
 
 class ShimSupervisor:
     def __init__(self, listen: str, upstream: str, id_key: str,
-                 max_conns: int, per_ip_per_min: int):
+                 max_conns: int, per_ip_per_min: int, diag_msgtypes: bool = False):
         self.listen = listen
         self.upstream = upstream
         self.id_key = id_key
         self.max_conns = max_conns
         self.per_ip_per_min = per_ip_per_min
+        self.diag_msgtypes = diag_msgtypes
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._fail_times: list[float] = []
@@ -50,7 +51,8 @@ class ShimSupervisor:
 
             async def _run():
                 srv = await asyncio.start_server(
-                    lambda r, w: shim_mod.handle(r, w, (uh, int(up)), sign_sk, gate),
+                    lambda r, w: shim_mod.handle(
+                        r, w, (uh, int(up)), sign_sk, gate, self.diag_msgtypes),
                     host, int(port))
                 log.info("shim listening %s -> %s", self.listen, self.upstream)
                 async with srv:

@@ -148,7 +148,7 @@ async def pipe_plain(src, dst, tag: str):
         log.warning("%s pipe error: %r", tag, e)
 
 
-async def pipe_c2s(reader, writer, crypt: SessionCrypt):
+async def pipe_c2s(reader, writer, crypt: SessionCrypt, diag: bool, peer):
     try:
         while True:
             p = await frame_decode(reader)
@@ -159,10 +159,31 @@ async def pipe_c2s(reader, writer, crypt: SessionCrypt):
             except Exception:
                 log.warning("c2s decrypt failed, closing")
                 break
+            if diag:
+                _log_msg("c2s", peer, plain)
             writer.write(frame_encode(plain))
             await writer.drain()
     except (ConnectionError, asyncio.IncompleteReadError):
         pass
+
+
+def _log_msg(direction: str, peer, payload: bytes) -> None:
+    """Diagnostic only (SHIM_DIAG_MSGTYPES=1): message type + target peer id.
+    Never tokens, keys, passwords or raw bytes."""
+    try:
+        m = rz.RendezvousMessage()
+        m.ParseFromString(payload)
+        kind = m.WhichOneof("union")
+        target = ""
+        if kind == "punch_hole_request":
+            target = f" id={m.punch_hole_request.id}"
+        elif kind == "request_relay":
+            target = f" id={m.request_relay.id}"
+        elif kind == "register_peer":
+            target = f" id={m.register_peer.id}"
+        log.info("%s %s%s", direction, kind, target)
+    except Exception as e:
+        log.info("%s unparsed (%d bytes): %r", direction, len(payload), e)
 
 
 async def pipe_s2c(reader, writer, crypt: SessionCrypt):
@@ -179,7 +200,7 @@ async def pipe_s2c(reader, writer, crypt: SessionCrypt):
         log.warning("s2c error: %r", e)
 
 
-async def handle(conn_r, conn_w, upstream, sign_sk: bytes, gate: Gate):
+async def handle(conn_r, conn_w, upstream, sign_sk: bytes, gate: Gate, diag: bool = False):
     peer = conn_w.get_extra_info("peername")
     ip = peer[0] if peer else "?"
     if not gate.admit(ip):
@@ -193,12 +214,12 @@ async def handle(conn_r, conn_w, upstream, sign_sk: bytes, gate: Gate):
         conn_w.close()
         return
     try:
-        await _handle(conn_r, conn_w, upstream, sign_sk, peer)
+        await _handle(conn_r, conn_w, upstream, sign_sk, peer, diag)
     finally:
         gate.sem.release()
 
 
-async def _handle(conn_r, conn_w, upstream, sign_sk: bytes, peer):
+async def _handle(conn_r, conn_w, upstream, sign_sk: bytes, peer, diag: bool = False):
     try:
         up_r, up_w = await asyncio.wait_for(asyncio.open_connection(*upstream), 10)
     except Exception as e:
@@ -256,7 +277,7 @@ async def _handle(conn_r, conn_w, upstream, sign_sk: bytes, peer):
         )
     elif crypt is not None:
         await asyncio.gather(
-            pipe_c2s(conn_r, up_w, crypt),
+            pipe_c2s(conn_r, up_w, crypt, diag, peer),
             pipe_s2c(up_r, conn_w, crypt),
         )
     else:

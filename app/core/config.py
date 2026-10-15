@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     shim_max_conns: int = 200
     shim_per_ip_per_min: int = 30
     shim_max_conns: int = 200
+    # Temporary diagnostics: log decrypted message types + target IDs
+    # (never tokens/keys). Off by default.
+    shim_diag_msgtypes: str = "0"
     # Request hardening.
     max_body_bytes: int = 5 * 1024 * 1024
     login_per_minute_per_ip: int = 20
