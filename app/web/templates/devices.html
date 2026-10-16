@@ -12,7 +12,6 @@
 <form method="post" action="/panel/devices/create">
 <input type="hidden" name="book" value="{{ book }}">
 <input name="rustdesk_id" placeholder="RustDesk ID" required><input name="alias" placeholder="Alias"><input name="note" placeholder="Note">
-<select name="customer_id"><option value="">-- customer --</option>{% for c in customers %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}</select>
 <input name="tags" placeholder="tags, comma separated"><input name="password" placeholder="password"><button>Add</button></form>
 {% for e in entries %}<div class="entry">
 <b>{{ e.alias or e.rustdesk_id }}</b> {{ e.rustdesk_id }} {% if e.note %}<i>{{ e.note }}</i>{% endif %}<br>

@@ -18,7 +18,6 @@ export function Layout({ children, onTheme, dark }: { children: React.ReactNode;
           <NavLink to="/" className={link}>Devices</NavLink>
           <NavLink to="/books" className={link}>Address Books</NavLink>
           <NavLink to="/tags" className={link}>Tags</NavLink>
-          <NavLink to="/customers" className={link}>Customers</NavLink>
           {u?.isAdmin && <NavLink to="/users" className={link}>Users</NavLink>}
         </nav>
       </aside>
@@ -43,7 +42,6 @@ export function Layout({ children, onTheme, dark }: { children: React.ReactNode;
           <NavLink to="/">Devices</NavLink>
           <NavLink to="/books">Books</NavLink>
           <NavLink to="/tags">Tags</NavLink>
-          <NavLink to="/customers">Clients</NavLink>
           {u?.isAdmin && <NavLink to="/users">Users</NavLink>}
         </nav>
       </div>

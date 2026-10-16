@@ -70,17 +70,6 @@ class AddressBook(Base):
     permissions: Mapped[list[AddressBookPermission]] = relationship(back_populates="book", cascade="all, delete-orphan")
 
 
-class Customer(Base):
-    __tablename__ = "customers"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
-    name: Mapped[str] = mapped_column(String(128), index=True)
-    note: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
-
-    entries: Mapped[list[AddressBookEntry]] = relationship(back_populates="customer")
-
-
 class AddressBookEntry(Base):
     __tablename__ = "address_book_entries"
     __table_args__ = (UniqueConstraint("address_book_id", "rustdesk_id", name="uq_book_rustdesk"),)
@@ -95,13 +84,11 @@ class AddressBookEntry(Base):
     platform: Mapped[str] = mapped_column(String(32), default="")
     hash_value: Mapped[str] = mapped_column(String(255), default="")
     password_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
-    customer_id: Mapped[str | None] = mapped_column(ForeignKey("customers.id", ondelete="SET NULL"), nullable=True)
     last_seen: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
     book: Mapped[AddressBook] = relationship(back_populates="entries")
-    customer: Mapped[Customer | None] = relationship(back_populates="entries")
     entry_tags: Mapped[list[EntryTag]] = relationship(back_populates="entry", cascade="all, delete-orphan")
 
 

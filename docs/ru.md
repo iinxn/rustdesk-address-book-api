@@ -26,7 +26,7 @@ handshake против OSS `hbbs`. **Клиент RustDesk не изменяет
 
 - **API (FastAPI)** — login/токены, личные + общие книги
   (`read`/`readWrite`/`fullControl`), CRUD peers, CRUD тегов с цветами и
-  переименованием, customers, админка пользователей, поиск, AND/OR-фильтры,
+  переименованием, админка пользователей, поиск, AND/OR-фильтры,
   пагинация, presence (`online`/`offline`/`unknown` + `last_seen` из heartbeat).
 - **Web Panel** — React 19 + Vite + TS + Tailwind 4 SPA на `/app/` (legacy
   server-rendered UI остался на `/panel/`).
@@ -38,7 +38,7 @@ handshake против OSS `hbbs`. **Клиент RustDesk не изменяет
 - **Хранилище** — одна SQLite-база `data/base.db`, миграции Alembic.
 
 Возможности и ограничения версии: без Docker; без встроенной TLS-терминации
-(спереди Caddy/Nginx); без per-user изоляции customers (глобальны); в legacy
+(спереди Caddy/Nginx); в legacy
 панели нет per-form CSRF-токенов (только SameSite=Lax); presence через
 heartbeat подделываем в пределах лимита (credentials у устройств нет по
 дизайну клиента).
@@ -237,18 +237,18 @@ RustDesk `{"error"}` с 400/403/404/409.
 | Метод | Путь | Примечания |
 |---|---|---|
 | GET | `/stats` | `{devices,online,offline,unknown}` по видимым книгам |
-| GET/POST | `/address-books` | список со счётчиками; создание `{name}` (admin, shared) |
-| GET | `/address-books/{bid}/entries` | `search,tag[] (повтор),mode=and\|or,untagged,customer_id,presence=all\|online\|offline\|unknown,sort=alias\|rustdesk_id\|last_seen\|status,order,page,page_size(≤200)` → `{total,data}` с `customer{name}`, `tag_objs[{name,color}]`, `presence`, `last_seen`, `password_configured`, timestamps |
-| POST | `/address-books/{bid}/entries` | `{rustdesk_id,alias,note,customer_id,tags[],password}`; `409` дубликат |
+| GET/POST | `/address-books` | список со счётчиками и твоим `rule`; создание `{name}` (admin, shared) |
+| PUT/DELETE | `/address-books/{bid}` | rename / delete shared-книги, только fullControl (rule 3); личные нельзя ни переименовать, ни удалить |
+| GET | `/address-books/{bid}/entries` | `search,tag[] (повтор),mode=and\|or,untagged,presence=all\|online\|offline\|unknown,sort=alias\|rustdesk_id\|last_seen\|status,order,page,page_size(≤200)` → `{total,data}` с `tag_objs[{name,color}]`, `presence`, `last_seen`, `password_configured`, timestamps |
+| POST | `/address-books/{bid}/entries` | `{rustdesk_id,alias,note,tags[],password}`; `409` дубликат |
 | GET/PUT/DELETE | `/entries/{eid}` | полный объект; PUT с пустым `password` оставляет старый |
 | GET/POST | `/address-books/{bid}/tags` | `[{id,name,color,devices}]`; `409` на дубликате |
 | PUT/DELETE | `/tags/{tid}` | rename+color; удаление рвёт только связи |
 | PUT/DELETE | `/entries/{eid}/tags/{tid}` | attach/detach |
-| GET/POST | `/customers`, PUT/DELETE | `/customers/{cid}`; в списке счётчик `devices` |
-| GET/POST | `/users`, PUT/DELETE | `/users/{uid}`; только admin; PUT `{is_admin?,is_disabled?,password?}`; self-delete/disable/demote запрещены |
+| GET/POST | `/users`, PUT/DELETE | `/users/{uid}`; только admin; PUT `{username?,is_admin?,is_disabled?,password?}`; self-delete/disable/demote запрещены |
 
 **Legacy-страницы** (`/panel/*`, cookie-сессия, HTML): `GET/POST /login`,
-`GET /logout`, `/devices`, `/tags`, `/customers`, `/users` с соответствующими
+`GET /logout`, `/devices`, `/tags`, `/users` с соответствующими
 create/update/delete form-posts; без входа → `303 /panel/login`.
 
 **Health:** `GET /health` → `{"ok":true}`; `/health/live` → live;
@@ -295,7 +295,7 @@ logout; проверка владения/ролей книг при каждо�
 проверки: `pip-audit` чисто, `bandit` 0 High, `npm audit` 0 уязвимостей.
 
 Известные принятые ограничения: неаутентифицированный heartbeat может шуметь
-в presence в пределах лимита; customers глобальны; в legacy-панели нет
+в presence в пределах лимита; в legacy-панели нет
 per-form CSRF (только SameSite=Lax); дефолтный `SESSION_DAYS=30` долог для
 враждебных сетей; само приложение отдаёт plain HTTP — для всего шире loopback
 спереди TLS-терминация (Caddy/Nginx).

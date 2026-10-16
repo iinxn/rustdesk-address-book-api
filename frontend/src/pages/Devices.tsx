@@ -5,7 +5,7 @@ import {
   btn, btnGhost, input, statusLabel,
 } from '../components';
 import { useDebounce, useTheme, useToasts } from '../hooks';
-import type { Book, Customer, Device, Stats, TagRow } from '../types';
+import type { Book, Device, Stats, TagRow } from '../types';
 
 const SIZE = 50;
 
@@ -17,14 +17,11 @@ export default function Devices() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [total, setTotal] = useState(0);
   const [tags, setTags] = useState<TagRow[]>([]);
-  const [customers, setCustomers] = useState<Customer[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [search, setSearch] = useState('');
   const [selTags, setSelTags] = useState<string[]>([]);
   const [mode, setMode] = useState<'and' | 'or'>('or');
   const [presence, setPresence] = useState('');
-  const [customer, setCustomer] = useState(() => sessionStorage.getItem('ab_customer') || '');
-  useEffect(() => { sessionStorage.removeItem('ab_customer'); }, []);
   const [sort, setSort] = useState('status');
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
@@ -34,7 +31,7 @@ export default function Devices() {
   const [confirmDel, setConfirmDel] = useState<Device | null>(null);
 
   const q = useDebounce(search);
-  const filtersActive = q !== '' || selTags.length > 0 || presence !== '' || customer !== '';
+  const filtersActive = q !== '' || selTags.length > 0 || presence !== '';
 
   const load = useCallback(async (silent = false) => {
     if (!book) return;
@@ -42,7 +39,7 @@ export default function Devices() {
     try {
       const [pg, t, s] = await Promise.all([
         api.entriesWithTags(book, {
-          search: q, mode, presence, customer_id: customer, sort, page, page_size: SIZE,
+          search: q, mode, presence, sort, page, page_size: SIZE,
         }, selTags),
         api.tags(book),
         api.stats(),
@@ -53,18 +50,20 @@ export default function Devices() {
     } finally {
       if (!silent) setLoading(false);
     }
-  }, [book, q, mode, presence, customer, sort, page, selTags]);
+  }, [book, q, mode, presence, sort, page, selTags]);
 
   useEffect(() => {
     api.books().then((b) => {
       setBooks(b);
-      if (b.length && !book) setBook(b[0].id);
+      const wanted = sessionStorage.getItem('ab_book') || '';
+      sessionStorage.removeItem('ab_book');
+      if (wanted && b.some((x) => x.id === wanted)) setBook(wanted);
+      else if (b.length && !book) setBook(b[0].id);
     }).catch(() => setFailed(true));
-    api.customers().then(setCustomers).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => { setPage(1); }, [q, selTags, mode, presence, customer, sort, book]);
+  useEffect(() => { setPage(1); }, [q, selTags, mode, presence, sort, book]);
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
     const t = setInterval(() => load(true), 20000);
@@ -72,7 +71,7 @@ export default function Devices() {
   }, [load]);
 
   const toggleTag = (n: string) => setSelTags((l) => (l.includes(n) ? l.filter((x) => x !== n) : [...l, n]));
-  const clearAll = () => { setSearch(''); setSelTags([]); setMode('or'); setPresence(''); setCustomer(''); };
+  const clearAll = () => { setSearch(''); setSelTags([]); setMode('or'); setPresence(''); };
 
   const doDelete = async () => {
     if (!confirmDel) return;
@@ -112,10 +111,6 @@ export default function Devices() {
           <option value="offline">Offline</option>
           <option value="unknown">Unknown</option>
         </select>
-        <select value={customer} onChange={(e) => setCustomer(e.target.value)} className={`${input} w-auto`}>
-          <option value="">All customers</option>
-          {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-        </select>
         {filtersActive && <button onClick={clearAll} className={btnGhost}>Clear filters</button>}
       </div>
 
@@ -154,7 +149,6 @@ export default function Devices() {
                 <span className="min-w-0 flex-1">
                   <span className="block truncate font-medium">{d.alias || d.rustdesk_id}</span>
                   <span className="block font-mono text-xs text-slate-500">{d.rustdesk_id}</span>
-                  {d.customer && <span className="block truncate text-xs text-slate-500">{d.customer.name}</span>}
                   <span className="mt-1 flex flex-wrap gap-1">
                     {d.tag_objs.map((t) => <TagBadge key={t.id} name={t.name} color={t.color} />)}
                   </span>
@@ -178,7 +172,6 @@ export default function Devices() {
             </p>
             <dl className="space-y-3 text-sm">
               <div><dt className="text-slate-500">RustDesk ID</dt><dd className="font-mono">{sel.rustdesk_id}</dd></div>
-              <div><dt className="text-slate-500">Customer</dt><dd>{sel.customer?.name || '—'}</dd></div>
               <div><dt className="text-slate-500">Tags</dt><dd className="flex flex-wrap gap-1">{sel.tag_objs.map((t) => <TagBadge key={t.id} name={t.name} color={t.color} />)}{sel.tag_objs.length === 0 && '—'}</dd></div>
               <div><dt className="text-slate-500">Note</dt><dd className="whitespace-pre-wrap">{sel.note || '—'}</dd></div>
               <div><dt className="text-slate-500">Last seen</dt><dd title={sel.last_seen || undefined}>{sel.last_seen ? new Date(sel.last_seen).toLocaleString() : 'Unknown'}</dd></div>
@@ -197,7 +190,7 @@ export default function Devices() {
 
       {editing && (
         <DeviceForm
-          book={book} initial={editing === 'new' ? null : editing} tags={tags} customers={customers}
+          book={book} initial={editing === 'new' ? null : editing} tags={tags}
           onClose={() => setEditing(null)}
           onSaved={(msg) => { setEditing(null); push(true, msg); load(); }}
           onError={(m) => push(false, m)}
@@ -209,14 +202,13 @@ export default function Devices() {
   );
 }
 
-function DeviceForm({ book, initial, tags, customers, onClose, onSaved, onError }: {
-  book: string; initial: Device | null; tags: TagRow[]; customers: Customer[];
+function DeviceForm({ book, initial, tags, onClose, onSaved, onError }: {
+  book: string; initial: Device | null; tags: TagRow[];
   onClose: () => void; onSaved: (m: string) => void; onError: (m: string) => void;
 }) {
   const [rid, setRid] = useState(initial?.rustdesk_id || '');
   const [alias, setAlias] = useState(initial?.alias || '');
   const [note, setNote] = useState(initial?.note || '');
-  const [cust, setCust] = useState(initial?.customer_id || '');
   const [pw, setPw] = useState('');
   const [sel, setSel] = useState<string[]>(initial?.tags || []);
   const [busy, setBusy] = useState(false);
@@ -225,7 +217,7 @@ function DeviceForm({ book, initial, tags, customers, onClose, onSaved, onError 
     if (!rid.trim()) { onError('RustDesk ID required'); return; }
     setBusy(true);
     try {
-      const body = { rustdesk_id: rid.trim(), alias, note, customer_id: cust || null, tags: sel, password: pw };
+      const body = { rustdesk_id: rid.trim(), alias, note, tags: sel, password: pw };
       if (initial) await api.updateEntry(initial.id, body);
       else await api.createEntry(book, body);
       onSaved(initial ? 'Device updated' : 'Device created');
@@ -240,12 +232,6 @@ function DeviceForm({ book, initial, tags, customers, onClose, onSaved, onError 
         <div className="space-y-3">
           <label className="block text-sm">RustDesk ID<input value={rid} onChange={(e) => setRid(e.target.value)} className={input} /></label>
           <label className="block text-sm">Alias<input value={alias} onChange={(e) => setAlias(e.target.value)} className={input} /></label>
-          <label className="block text-sm">Customer
-            <select value={cust} onChange={(e) => setCust(e.target.value)} className={input}>
-              <option value="">—</option>
-              {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-            </select>
-          </label>
           <div className="text-sm">Tags
             <div className="mt-1 max-h-32 overflow-y-auto rounded border border-slate-200 p-2 dark:border-slate-700">
               {tags.map((t) => (

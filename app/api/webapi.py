@@ -1,11 +1,11 @@
 """Internal Web Panel JSON API (/api/v1/*). Bearer auth, same tokens.
 
-Extended shapes (customer/tag objects, presence, counts) live ONLY here;
+Extended shapes (tag objects, presence, counts) live ONLY here;
 RustDesk-compatible /api/ab/* is untouched.
 """
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
-from sqlalchemy import func, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import current_user
@@ -14,12 +14,11 @@ from app.core.validators import validate_rustdesk_id
 from app.models.models import (
     AddressBook,
     AddressBookEntry,
-    Customer,
     EntryTag,
     Tag,
     User,
 )
-from app.schemas.panel import CustomerIn, EntryIn, TagIn, UserIn
+from app.schemas.panel import EntryIn, TagIn, UserIn
 from app.services import ab as ab_svc
 from app.services import presence as presence_svc
 from app.db.session import get_db
@@ -45,14 +44,11 @@ def books_visible(db: Session, user: User) -> list[AddressBook]:
 def entry_out(db: Session, e: AddressBookEntry) -> dict:
     state, last_seen = presence_svc.status_of(e)
     tags = db.scalars(select(Tag).join(EntryTag, EntryTag.tag_id == Tag.id).where(EntryTag.entry_id == e.id).order_by(Tag.name)).all()
-    cust = db.get(Customer, e.customer_id) if e.customer_id else None
     return {
         "id": e.id,
         "rustdesk_id": e.rustdesk_id,
         "alias": e.alias,
         "note": e.note,
-        "customer_id": e.customer_id,
-        "customer": {"id": cust.id, "name": cust.name} if cust else None,
         "tags": [t.name for t in tags],
         "tag_objs": [{"id": t.id, "name": t.name, "color": t.color} for t in tags],
         "presence": state,
@@ -84,7 +80,8 @@ def stats(user: User = Depends(current_user), db: Session = Depends(get_db)):
 def list_books(user: User = Depends(current_user), db: Session = Depends(get_db)):
     out = []
     for b in books_visible(db, user):
-        d = {"id": b.id, "name": b.name, "type": b.type}
+        d = {"id": b.id, "name": b.name, "type": b.type,
+             "rule": ab_svc.rule_for(db, user, b)}
         d.update(_book_counts(db, b.id))
         out.append(d)
     return out
@@ -104,6 +101,37 @@ def create_book(body: dict, user: User = Depends(current_user), db: Session = De
     return {"id": b.id, "name": b.name, "type": b.type}
 
 
+@router.put("/address-books/{bid}")
+def rename_book(bid: str, body: dict, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    book = ab_svc.get_book_for_user(db, user, bid)
+    if book is None:
+        return err("no such book", 404)
+    if book.type != "shared":
+        return err("only shared books can be renamed", 400)
+    if ab_svc.rule_for(db, user, book) < 3:
+        return err("full control required", 403)
+    name = str(body.get("name", "")).strip()
+    if not name:
+        return err("missing name", 400)
+    book.name = name
+    db.commit()
+    return {"id": book.id, "name": book.name, "type": book.type}
+
+
+@router.delete("/address-books/{bid}")
+def delete_book(bid: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    book = ab_svc.get_book_for_user(db, user, bid)
+    if book is None:
+        return err("no such book", 404)
+    if book.type != "shared":
+        return err("personal address book cannot be deleted", 400)
+    if ab_svc.rule_for(db, user, book) < 3:
+        return err("full control required", 403)
+    db.delete(book)  # entries, tags and permissions cascade via ORM relationships
+    db.commit()
+    return {"ok": True}
+
+
 @router.get("/address-books/{bid}/entries")
 def list_entries(
     bid: str,
@@ -111,7 +139,6 @@ def list_entries(
     tag: list[str] = Query(default=[]),
     mode: str = "or",
     untagged: bool = False,
-    customer_id: str = "",
     presence: str = "all",
     sort: str = "alias",
     order: str = "asc",
@@ -128,8 +155,6 @@ def list_entries(
         like = f"%{search}%"
         q = q.where(or_(AddressBookEntry.rustdesk_id.like(like), AddressBookEntry.alias.like(like),
                         AddressBookEntry.note.like(like)))
-    if customer_id:
-        q = q.where(AddressBookEntry.customer_id == customer_id)
     entries = list(db.scalars(q))
     enriched = [(e, ab_svc.entry_tag_names(db, e.id), presence_svc.status_of(e)[0]) for e in entries]
     if tag:
@@ -171,7 +196,7 @@ def create_entry(bid: str, body: EntryIn, user: User = Depends(current_user), db
         return err("duplicate", 409)
     e = AddressBookEntry(
         address_book_id=bid, rustdesk_id=body.rustdesk_id, alias=body.alias,
-        note=body.note, customer_id=body.customer_id,
+        note=body.note,
         password_encrypted=encrypt_password(body.password) if body.password else None,
     )
     db.add(e)
@@ -200,7 +225,7 @@ def update_entry(eid: str, body: EntryIn, user: User = Depends(current_user), db
     book = ab_svc.get_book_for_user(db, user, e.address_book_id)
     if book is None or not ab_svc.can_write(ab_svc.rule_for(db, user, book)):
         return err("read-only", 403)
-    e.alias, e.note, e.customer_id = body.alias, body.note, body.customer_id
+    e.alias, e.note = body.alias, body.note
     if body.password:
         e.password_encrypted = encrypt_password(body.password)
     if body.rustdesk_id != e.rustdesk_id:
@@ -311,44 +336,6 @@ def detach_tag(eid: str, tid: str, user: User = Depends(current_user), db: Sessi
     return {"ok": True}
 
 
-@router.get("/customers")
-def list_customers(user: User = Depends(current_user), db: Session = Depends(get_db)):
-    out = []
-    for c in db.scalars(select(Customer).order_by(Customer.name)):
-        n = db.scalar(select(func.count()).select_from(AddressBookEntry).where(AddressBookEntry.customer_id == c.id)) or 0
-        out.append({"id": c.id, "name": c.name, "note": c.note, "devices": n})
-    return out
-
-
-@router.post("/customers")
-def create_customer(body: CustomerIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    c = Customer(name=body.name, note=body.note)
-    db.add(c)
-    db.commit()
-    db.refresh(c)
-    return {"id": c.id, "name": c.name, "note": c.note, "devices": 0}
-
-
-@router.put("/customers/{cid}")
-def update_customer(cid: str, body: CustomerIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    c = db.get(Customer, cid)
-    if c is None:
-        return err("not found", 404)
-    c.name, c.note = body.name, body.note
-    db.commit()
-    return {"id": c.id, "name": c.name, "note": c.note}
-
-
-@router.delete("/customers/{cid}")
-def delete_customer(cid: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    c = db.get(Customer, cid)
-    if c is None:
-        return err("not found", 404)
-    db.delete(c)
-    db.commit()
-    return {"ok": True}
-
-
 @router.get("/users")
 def list_users(user: User = Depends(current_user), db: Session = Depends(get_db)):
     if not user.is_admin:
@@ -369,12 +356,19 @@ def create_panel_user(body: UserIn, user: User = Depends(current_user), db: Sess
 
 @router.put("/users/{uid}")
 def update_panel_user(uid: str, body: dict, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    """Edit user: {is_admin?, is_disabled?, password?}. Admin only."""
+    """Edit user: {username?, is_admin?, is_disabled?, password?}. Admin only."""
     if not user.is_admin:
         return err("admin required", 403)
     u = db.get(User, uid)
     if u is None:
         return err("not found", 404)
+    if "username" in body:
+        new_name = str(body["username"]).strip()
+        if not new_name:
+            return err("missing username", 400)
+        if new_name != u.username and db.scalar(select(User).where(User.username == new_name)):
+            return err("duplicate", 409)
+        u.username = new_name
     if "is_admin" in body:
         if u.id == user.id and not body["is_admin"]:
             return err("cannot demote self", 400)

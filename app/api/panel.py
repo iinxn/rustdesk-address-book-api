@@ -6,7 +6,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.models.models import AddressBook, AddressBookEntry, Customer, Tag, User
+from app.models.models import AddressBook, AddressBookEntry, Tag, User
 from app.services import ab as ab_svc
 from app.services.auth import authenticate, create_user
 
@@ -73,7 +73,6 @@ def devices_page(
     tags_param = request.query_params.getlist("tag")
     entries: list[dict] = []
     all_tags: list[Tag] = []
-    customers = list(db.scalars(select(Customer).order_by(Customer.name)))
     if book:
         all_tags = list(db.scalars(select(Tag).where(Tag.address_book_id == book).order_by(Tag.name)))
         q = select(AddressBookEntry).where(AddressBookEntry.address_book_id == book)
@@ -92,10 +91,10 @@ def devices_page(
             if untagged and names:
                 continue
             entries.append({"id": e.id, "rustdesk_id": e.rustdesk_id, "alias": e.alias, "note": e.note,
-                            "tags": sorted(names), "customer_id": e.customer_id})
+                            "tags": sorted(names)})
     return templates.TemplateResponse(request, "devices.html", {
         "user": user, "books": books, "book": book,
-        "entries": entries, "all_tags": all_tags, "customers": customers,
+        "entries": entries, "all_tags": all_tags,
         "search": search, "sel_tags": tags_param, "mode": mode, "untagged": untagged,
     })
 
@@ -103,7 +102,7 @@ def devices_page(
 @router.post("/devices/create")
 def device_create(
     request: Request, book: str = Form(""), rustdesk_id: str = Form(""), alias: str = Form(""),
-    note: str = Form(""), customer_id: str = Form(""), tags: str = Form(""), password: str = Form(""),
+    note: str = Form(""), tags: str = Form(""), password: str = Form(""),
     db: Session = Depends(get_db),
 ):
     user = require_login(request, db)
@@ -115,7 +114,6 @@ def device_create(
     if validate_rustdesk_id(rid) is None and db.scalar(select(AddressBookEntry).where(AddressBookEntry.address_book_id == book, AddressBookEntry.rustdesk_id == rid)) is None:
         from app.core.crypto import encrypt_password
         e = AddressBookEntry(address_book_id=book, rustdesk_id=rid, alias=alias.strip(), note=note.strip(),
-                             customer_id=customer_id or None,
                              password_encrypted=encrypt_password(password) if password else None)
         db.add(e)
         db.flush()
@@ -197,32 +195,6 @@ def tag_delete(request: Request, tid: str, db: Session = Depends(get_db)):
             db.delete(t)
             db.commit()
     return RedirectResponse(f"/panel/tags?book={book_id}", status_code=303)
-
-
-@router.get("/customers", response_class=HTMLResponse)
-def customers_page(request: Request, db: Session = Depends(get_db)):
-    user = require_login(request, db)
-    customers = list(db.scalars(select(Customer).order_by(Customer.name)))
-    return templates.TemplateResponse(request, "customers.html", {"user": user, "customers": customers})
-
-
-@router.post("/customers/create")
-def customer_create(request: Request, name: str = Form(""), note: str = Form(""), db: Session = Depends(get_db)):
-    require_login(request, db)
-    if name.strip():
-        db.add(Customer(name=name.strip(), note=note.strip()))
-        db.commit()
-    return RedirectResponse("/panel/customers", status_code=303)
-
-
-@router.post("/customers/{cid}/delete")
-def customer_delete(request: Request, cid: str, db: Session = Depends(get_db)):
-    require_login(request, db)
-    c = db.get(Customer, cid)
-    if c is not None:
-        db.delete(c)
-        db.commit()
-    return RedirectResponse("/panel/customers", status_code=303)
 
 
 @router.get("/users", response_class=HTMLResponse)

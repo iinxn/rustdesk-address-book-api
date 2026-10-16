@@ -15,6 +15,7 @@ export default function Tags() {
   const [failed, setFailed] = useState(false);
   const [name, setName] = useState('');
   const [color, setColor] = useState('#3b82f6');
+  const [creating, setCreating] = useState(false);
   const [renaming, setRenaming] = useState<TagRow | null>(null);
   const [newName, setNewName] = useState('');
   const [confirm, setConfirm] = useState<TagRow | null>(null);
@@ -36,7 +37,7 @@ export default function Tags() {
     if (!name.trim()) return;
     try {
       await api.createTag(book, { name: name.trim(), color: hexToInt(color) });
-      setName(''); push(true, 'Tag created'); load();
+      setName(''); setCreating(false); push(true, 'Tag created'); load();
     } catch (e) { push(false, String((e as Error).message)); }
   };
   const saveColor = async (t: TagRow, c: string) => {
@@ -62,14 +63,14 @@ export default function Tags() {
 
   return (
     <Layout dark={dark} onTheme={toggle}>
-      <h1 className="mb-3 text-xl font-bold">Tags</h1>
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <h1 className="text-xl font-bold">Tags</h1>
+        <button onClick={() => { setName(''); setCreating(true); }} className={btn}>+ Create tag</button>
+      </div>
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <select value={book} onChange={(e) => setBook(e.target.value)} className={`${input} w-auto`}>
           {books.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
         </select>
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="New tag name" className={`${input} w-48`} />
-        <input type="color" value={color} onChange={(e) => setColor(e.target.value)} className="h-8 w-10 cursor-pointer" />
-        <button onClick={create} className={btn}>+ Create tag</button>
       </div>
       {loading ? <Loading text="Loading tags" /> : failed ? <LoadError onRetry={load} /> : (
         <div className="overflow-hidden rounded-lg border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
@@ -110,6 +111,21 @@ export default function Tags() {
         </div>
       )}
       {confirm && <Confirm text={`Delete tag "${confirm.name}"? Devices stay, links are removed.`} onYes={doDelete} onNo={() => setConfirm(null)} />}
+      {creating && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setCreating(false)}>
+          <div className="w-80 rounded-lg bg-white p-4 dark:bg-slate-900" onClick={(e) => e.stopPropagation()}>
+            <h2 className="mb-3 font-bold">Create tag</h2>
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Tag name" className={`${input} mb-2`} />
+            <label className="flex items-center gap-2 text-sm">Color
+              <input type="color" value={color} onChange={(e) => setColor(e.target.value)} className="h-8 w-10 cursor-pointer" />
+            </label>
+            <div className="mt-3 flex justify-end gap-2">
+              <button onClick={() => setCreating(false)} className={btnGhost}>Cancel</button>
+              <button onClick={create} className={btn}>Create</button>
+            </div>
+          </div>
+        </div>
+      )}
       <Toasts items={items} />
     </Layout>
   );

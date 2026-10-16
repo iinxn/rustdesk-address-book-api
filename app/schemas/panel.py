@@ -12,7 +12,6 @@ class EntryIn(BaseModel):
     rustdesk_id: str
     alias: str = ""
     note: str = ""
-    customer_id: str | None = None
     tags: list[str] = []
     password: str = ""
 
@@ -22,7 +21,6 @@ class EntryOut(BaseModel):
     rustdesk_id: str
     alias: str = ""
     note: str = ""
-    customer_id: str | None = None
     tags: list[str] = []
     model_config = {"from_attributes": True}
 
@@ -37,18 +35,6 @@ class TagOut(BaseModel):
     name: str
     color: int = 0
     devices: int = 0
-    model_config = {"from_attributes": True}
-
-
-class CustomerIn(BaseModel):
-    name: str
-    note: str = ""
-
-
-class CustomerOut(BaseModel):
-    id: str
-    name: str
-    note: str = ""
     model_config = {"from_attributes": True}
 
 

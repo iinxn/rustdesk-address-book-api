@@ -26,7 +26,7 @@ Components and responsibilities:
 
 - **API (FastAPI)** — login/token sessions, personal + shared address books
   (`read`/`readWrite`/`fullControl`), peers CRUD, tag CRUD incl. colors and
-  rename, customers, user admin, search, AND/OR tag filters, pagination,
+  rename, user admin, search, AND/OR tag filters, pagination,
   presence (`online`/`offline`/`unknown` + `last_seen` from device heartbeats).
 - **Web Panel** — React 19 + Vite + TS + Tailwind 4 SPA at `/app/` (a legacy
   server-rendered UI remains at `/panel/`).
@@ -39,8 +39,7 @@ Components and responsibilities:
 - **Storage** — one SQLite database at `data/base.db`, Alembic migrations.
 
 Capabilities and limits of this version: no Docker setup, no built-in TLS
-termination (use Caddy/Nginx in front for anything beyond loopback), no
-per-user customer isolation (customers are global), legacy panel has no
+termination (use Caddy/Nginx in front for anything beyond loopback), legacy panel has no
 per-form CSRF tokens (SameSite=Lax only), heartbeat presence is spoofable
 within rate limits (devices have no credentials by client design).
 
@@ -240,18 +239,18 @@ is rejected with `422` — such IDs would redirect client transport.
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/stats` | `{devices,online,offline,unknown}` over visible books |
-| GET/POST | `/address-books` | list with counts; create `{name}` (admin, shared) |
-| GET | `/address-books/{bid}/entries` | `search,tag[] (repeat),mode=and\|or,untagged,customer_id,presence=all\|online\|offline\|unknown,sort=alias\|rustdesk_id\|last_seen\|status,order,page,page_size(≤200)` → `{total,data}` with `customer{name}`, `tag_objs[{name,color}]`, `presence`, `last_seen`, `password_configured`, timestamps |
-| POST | `/address-books/{bid}/entries` | `{rustdesk_id,alias,note,customer_id,tags[],password}`; `409` duplicate |
+| GET/POST | `/address-books` | list with counts and your `rule`; create `{name}` (admin, shared) |
+| PUT/DELETE | `/address-books/{bid}` | rename / delete shared book, fullControl (rule 3) only; personal books can neither be renamed nor deleted |
+| GET | `/address-books/{bid}/entries` | `search,tag[] (repeat),mode=and\|or,untagged,presence=all\|online\|offline\|unknown,sort=alias\|rustdesk_id\|last_seen\|status,order,page,page_size(≤200)` → `{total,data}` with `tag_objs[{name,color}]`, `presence`, `last_seen`, `password_configured`, timestamps |
+| POST | `/address-books/{bid}/entries` | `{rustdesk_id,alias,note,tags[],password}`; `409` duplicate |
 | GET/PUT/DELETE | `/entries/{eid}` | full object; empty `password` on PUT keeps the old one |
 | GET/POST | `/address-books/{bid}/tags` | `[{id,name,color,devices}]`; `409` on duplicate |
 | PUT/DELETE | `/tags/{tid}` | rename+color; delete removes links only |
 | PUT/DELETE | `/entries/{eid}/tags/{tid}` | attach/detach |
-| GET/POST | `/customers` (+PUT/DELETE `/{cid}`) | list includes `devices` count |
-| GET/POST | `/users` (+PUT/DELETE `/{uid}`) | admin only; PUT `{is_admin?,is_disabled?,password?}`; self-delete/disable/demote refused |
+| GET/POST | `/users` (+PUT/DELETE `/{uid}`) | admin only; PUT `{username?,is_admin?,is_disabled?,password?}`; self-delete/disable/demote refused |
 
 **Legacy pages** (`/panel/*`, cookie session, HTML): `GET/POST /login`,
-`GET /logout`, `/devices`, `/tags`, `/customers`, `/users` with matching
+`GET /logout`, `/devices`, `/tags`, `/users` with matching
 create/update/delete form posts; unauthenticated → `303 /panel/login`.
 
 **Health:** `GET /health` → `{"ok":true}`; `/health/live` → live;
@@ -297,7 +296,7 @@ autoescape on; error responses carry no traces/paths/SQL. Dependency labels
 at last check: `pip-audit` clean, `bandit` 0 High, `npm audit` 0 vulnerabilities.
 
 Known accepted limits: unauthenticated heartbeat can skew presence within its
-rate limit; customers are global; legacy panel has SameSite=Lax but no
+rate limit; legacy panel has SameSite=Lax but no
 per-form CSRF tokens; default `SESSION_DAYS=30` is long for hostile networks;
 the app serves plain HTTP — terminate TLS in front (Caddy/Nginx) for anything
 beyond loopback.

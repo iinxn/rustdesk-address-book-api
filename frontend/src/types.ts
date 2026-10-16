@@ -15,8 +15,6 @@ export interface Device {
   rustdesk_id: string;
   alias: string;
   note: string;
-  customer_id: string | null;
-  customer: { id: string; name: string } | null;
   tags: string[];
   tag_objs: TagObj[];
   presence: Presence;
@@ -30,17 +28,11 @@ export interface Book {
   id: string;
   name: string;
   type: string;
+  rule: number;
   devices: number;
   online: number;
   offline: number;
   unknown: number;
-}
-
-export interface Customer {
-  id: string;
-  name: string;
-  note: string;
-  devices: number;
 }
 
 export interface PanelUser {
