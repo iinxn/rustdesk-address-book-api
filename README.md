@@ -156,6 +156,28 @@ so the shim owns `21116`. Restart the app. `/health/ready` should report
 `"shim":{"state":"running",...}`. Point the RustDesk client ID server at the
 shim host, keep the same Key as for `hbbs`.
 
+### Docker setup
+
+Needs Docker Engine + Compose plugin on the build/run machine (not on dev box).
+The image builds the React panel itself (multi-stage, no local `dist/` needed)
+and runs as non-root. The database stays on the host, never in the container.
+
+```bash
+mkdir -p data keys && chmod 700 data
+# DEVICE_SECRET + WEB_SECRET можно оставить CHANGEME — entrypoint сгенерирует
+# их при первом старте и сохранит в data/.secrets.env (переиспользуются дальше)
+cp /path/to/hbbs-id_ed25519 keys/ && chmod 600 keys/id_ed25519  # only if SHIM_ENABLED=1
+chown -R $(id -u):$(id -g) data    # image runs as UID 1000
+docker compose up -d --build
+docker compose logs -f             # expect "migrations ok", then serving
+curl http://127.0.0.1:8000/health/ready
+```
+
+Stop keeps data: `docker compose down`. Admin user: `docker compose exec app python -m app.cli create-admin`.
+All knobs (ports, `HOST`, `SESSION_DAYS`, shim, rate limits) are environment
+variables in `docker-compose.yml` with comments — edit the file, then
+`docker compose up -d` again. Details: `Dockerfile`, `docker-compose.yml`.
+
 ## Configuration
 
 All settings are environment variables (or `.env` file), all optional except

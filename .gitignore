@@ -13,3 +13,7 @@ certs/
 *.key
 *.pub
 id_ed25519*
+.dockerignore
+docker-compose.yml
+Dockerfile
+.secrets.env
