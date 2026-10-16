@@ -117,6 +117,7 @@ class Gate:
 
     def __init__(self, max_conns: int, per_min_per_ip: int):
         self.sem = asyncio.Semaphore(max_conns)
+        self.max_conns = max_conns
         self.per_min = per_min_per_ip
         self.hits: dict[str, deque] = {}
 
@@ -201,6 +202,7 @@ async def pipe_s2c(reader, writer, crypt: SessionCrypt):
 
 
 async def handle(conn_r, conn_w, upstream, sign_sk: bytes, gate: Gate, diag: bool = False):
+
     peer = conn_w.get_extra_info("peername")
     ip = peer[0] if peer else "?"
     if not gate.admit(ip):
@@ -293,24 +295,188 @@ async def _handle(conn_r, conn_w, upstream, sign_sk: bytes, peer, diag: bool = F
     log.info("%s: closed (%s)", peer, mode)
 
 
+# UDP rendezvous relay (plaintext protobuf: the UDP path has no crypto,
+# all of it lives in the TCP Stream). NAT-style: each client address gets its
+# own upstream socket so replies route back unambiguously. Sessions expire on
+# idle; counts are capped; only session creation is rate-limited (datagrams
+# themselves are cheap, keepalives must not trip the limiter).
+UDP_IDLE_TIMEOUT = 120.0
+UDP_SWEEP_INTERVAL = 30.0
+UDP_MAX_DATAGRAM = 65507
+
+
+class _UpstreamProto(asyncio.DatagramProtocol):
+    def __init__(self, queue: asyncio.Queue):
+        self.queue = queue
+
+    def datagram_received(self, data: bytes, addr):
+        try:
+            self.queue.put_nowait((data, addr))
+        except asyncio.QueueFull:
+            pass
+
+    def error_received(self, exc):
+        pass
+
+    def connection_lost(self, exc):
+        try:
+            self.queue.put_nowait(None)
+        except asyncio.QueueFull:
+            pass
+
+
+class UdpRelay:
+    def __init__(self, upstream: tuple[str, int], gate: Gate):
+        self.upstream = upstream
+        self.gate = gate
+        self.transport: asyncio.DatagramTransport | None = None
+        self.sessions: dict[tuple, dict] = {}
+        self._tasks: set[asyncio.Task] = set()
+        self._closed = False
+
+    async def start(self, host: str, port: int):
+        loop = asyncio.get_running_loop()
+        transport, _ = await loop.create_datagram_endpoint(
+            lambda: _ListenProto(self), local_addr=(host, port))
+        self.transport = transport
+        self._tasks.add(asyncio.create_task(self._sweep()))
+        log.info("udp relay listening %s:%d -> %s:%d", host, port, *self.upstream)
+
+    def datagram_received(self, data: bytes, addr):
+        try:
+            self._on_datagram(data, addr)
+        except Exception as e:
+            log.warning("udp dispatch error from %s: %r", addr[0] if addr else "?", e)
+
+    def _on_datagram(self, data: bytes, addr):
+        if self._closed or len(data) > UDP_MAX_DATAGRAM:
+            return
+        sess = self.sessions.get(addr)
+        if sess is None:
+            ip = addr[0]
+            if not self.gate.admit(ip):
+                log.warning("%s: udp rate limited", ip)
+                return
+            if len(self.sessions) >= self.gate.max_conns:
+                log.warning("udp relay full (%d), drop %s", len(self.sessions), ip)
+                return
+            sess = {"queue": asyncio.Queue(), "last": time.monotonic(),
+                    "up": None, "pending": data}
+            self.sessions[addr] = sess
+            self._tasks.add(asyncio.create_task(self._responder(addr)))
+            log.info("udp session opened for %s", ip)
+            return
+        sess["last"] = time.monotonic()
+        up = sess["up"]
+        if up is not None:
+            up.sendto(data)
+
+    async def _responder(self, addr):
+        sess = self.sessions.get(addr)
+        if sess is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            transport, _ = await loop.create_datagram_endpoint(
+                lambda: _UpstreamProto(sess["queue"]),
+                remote_addr=self.upstream)
+            sess["up"] = transport
+            pending = sess.pop("pending", b"")
+            if pending:
+                transport.sendto(pending)
+            while True:
+                try:
+                    item = await asyncio.wait_for(sess["queue"].get(), UDP_IDLE_TIMEOUT)
+                except asyncio.TimeoutError:
+                    break
+                if item is None:
+                    break
+                data, _ = item
+                if self.transport is not None and not self._closed:
+                    self.transport.sendto(data, addr)
+                sess["last"] = time.monotonic()
+        except (ConnectionError, OSError) as e:
+            log.warning("udp upstream error for %s: %r", addr[0], e)
+        finally:
+            self._drop(addr)
+
+    def _drop(self, addr):
+        sess = self.sessions.pop(addr, None)
+        if sess is None:
+            return
+        up = sess.get("up")
+        if up is not None:
+            try:
+                up.close()
+            except Exception:
+                pass
+        try:
+            sess["queue"].put_nowait(None)
+        except asyncio.QueueFull:
+            pass
+        log.info("udp session closed for %s", addr[0])
+
+    async def _sweep(self):
+        try:
+            while not self._closed:
+                await asyncio.sleep(UDP_SWEEP_INTERVAL)
+                now = time.monotonic()
+                for addr, sess in list(self.sessions.items()):
+                    if now - sess["last"] > UDP_IDLE_TIMEOUT:
+                        self._drop(addr)
+        except asyncio.CancelledError:
+            pass
+
+    async def aclose(self):
+        self._closed = True
+        for addr in list(self.sessions):
+            self._drop(addr)
+        for t in list(self._tasks):
+            t.cancel()
+        if self.transport is not None:
+            try:
+                self.transport.close()
+            except Exception:
+                pass
+            self.transport = None
+
+
+class _ListenProto(asyncio.DatagramProtocol):
+    def __init__(self, relay: UdpRelay):
+        self.relay = relay
+
+    def datagram_received(self, data: bytes, addr):
+        self.relay.datagram_received(data, addr)
+
+    def error_received(self, exc):
+        pass
+
+
 async def amain(args):
     host, port = args.listen.rsplit(":", 1)
     uh, up = args.upstream.rsplit(":", 1)
     sign_sk = load_sign_sk(args.id_key)
     gate = Gate(args.max_conns, args.per_ip_per_min)
     log.info("signing with hbbs key (pub=%s…)", base64.b64encode(sign_sk[32:]).decode()[:12])
+    relay = UdpRelay((uh, int(up)), gate)
+    await relay.start(host, int(port))
     srv = await asyncio.start_server(
         lambda r, w: handle(r, w, (uh, int(up)), sign_sk, gate), host, int(port))
     log.info("listening %s -> upstream %s", args.listen, args.upstream)
-    async with srv:
-        await srv.serve_forever()
+    try:
+        async with srv:
+            await srv.serve_forever()
+    finally:
+        await relay.aclose()
 
 
 def build_parser():
     import argparse as _ap
     ap = _ap.ArgumentParser(prog="app.shim")
     ap.add_argument("--listen", default="127.0.0.1:21116")
-    ap.add_argument("--upstream", default="127.0.0.1:21117")
+    # NOTE: the relay port (hbbs 21117) speaks a different protocol — upstream
+    # must be the hbbs *rendezvous* port (moved with `hbbs -p`, e.g. 21166).
+    ap.add_argument("--upstream", default="127.0.0.1:21166")
     ap.add_argument("--id-key", default="")
     ap.add_argument("--max-conns", type=int, default=MAX_CONNS)
     ap.add_argument("--per-ip-per-min", type=int, default=MAX_CONNS_PER_MIN_PER_IP)

@@ -50,6 +50,8 @@ class ShimSupervisor:
             gate = shim_mod.Gate(self.max_conns, self.per_ip_per_min)
 
             async def _run():
+                relay = shim_mod.UdpRelay((uh, int(up)), gate)
+                await relay.start(host, int(port))
                 srv = await asyncio.start_server(
                     lambda r, w: shim_mod.handle(
                         r, w, (uh, int(up)), sign_sk, gate, self.diag_msgtypes),
@@ -60,6 +62,7 @@ class ShimSupervisor:
                         await asyncio.sleep(0.2)
                     srv.close()
                     await srv.wait_closed()
+                    await relay.aclose()
 
             asyncio.run(_run())
             self.state = "stopped"

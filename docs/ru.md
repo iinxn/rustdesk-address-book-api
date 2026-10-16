@@ -30,7 +30,7 @@ handshake против OSS `hbbs`. **Клиент RustDesk не изменяет
   пагинация, presence (`online`/`offline`/`unknown` + `last_seen` из heartbeat).
 - **Web Panel** — React 19 + Vite + TS + Tailwind 4 SPA на `/app/` (legacy
   server-rendered UI остался на `/panel/`).
-- **KX shim** — rendezvous-прокси на TCP `21116`. Залогиненные клиенты RustDesk
+- **KX shim** — rendezvous-прокси на TCP+UDP `21116`. Залогиненные клиенты RustDesk
   1.4.x требуют server-first `KeyExchange`-хендшейк, который OSS `hbbs` никогда
   не шлёт (иначе `Failed to secure tcp: deadline has elapsed`). Шим выполняет
   серверную сторону хендшейка ключом вашего hbbs и проксирует расшифрованный
@@ -134,7 +134,7 @@ curl -X POST http://127.0.0.1:8000/api/ab/personal \
 flowchart LR
     C[RustDesk client<br/>без изменений]
     C -->|HTTP/HTTPS :8000<br/>/api/* : Bearer token| API[FastAPI app<br/>роутеры rustdesk/webapi/panel]
-    C -->|TCP 21116<br/>KeyExchange или plain| SHIM[KX shim<br/>поток под надзором]
+    C -->|TCP+UDP 21116<br/>KX/secure, plain, дейтаграммы| SHIM[KX shim<br/>поток под надзором]
     SHIM -->|расшифрованный protobuf<br/>SHIM_UPSTREAM| HBBS[настоящий hbbs rendezvous]
     C -->|/app/ :8000| SPA[Web Panel dist/]
     API -->|SQLAlchemy 2.x<br/>FK ON, busy_timeout 5000| DB[(SQLite data/base.db<br/>Alembic 0001-0002)]
@@ -264,11 +264,19 @@ create/update/delete form-posts; без входа → `303 /panel/login`.
 с тем же Key, что для hbbs. Входите и подключаетесь из книги: в логе шима
 `secure established`; подключения без логина — `plain passthrough`.
 
-Внутренности: на accept шим сразу шлёт `KeyExchange{sign(box_pk)}`; ответный
+Внутренности (TCP): на accept шим сразу шлёт `KeyExchange{sign(box_pk)}`; ответный
 `KeyExchange` с 2 ключами включает secretbox (схема v0 `set_key`: счётчики на
 направление инкрементятся до использования, первый шифрокадр — nonce 1,
 пустые кадры идут открыто); любой другой первый кадр — plain passthrough
 (plain-клиенты наш KX игнорируют через свой `get_next_nonkeyexchange_msg`).
+
+Внутренности (UDP): тот же listen-порт ретранслирует rendezvous UDP-дейтаграммы
+(регистрация, NAT-тест, координация punch) в upstream hbbs. На UDP-пути нет
+криптографии по дизайну протокола, поэтому это обычный форвардер: каждому
+адресу клиента — свой исходящий сокет (ответы возвращаются однозначно),
+простаивающие сессии умирают через 120 с, новые сессии делят лимиты
+`SHIM_MAX_CONNS` / `SHIM_PER_IP_PER_MIN` (лимитируется только создание сессий,
+keepalive — нет). Проверено: ответы побайтово идентичны прямым от hbbs.
 Сбои: недоступный upstream закрывает соединение через 10 с с warning;
 crash loop → `down` + `503` на ready после 5 падений за 10 мин (бэкофф
 1,2,4,8,16,30,60 с), API продолжает работать; `/health/ready` — единственный

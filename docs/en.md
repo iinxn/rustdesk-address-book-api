@@ -30,7 +30,7 @@ Components and responsibilities:
   presence (`online`/`offline`/`unknown` + `last_seen` from device heartbeats).
 - **Web Panel** — React 19 + Vite + TS + Tailwind 4 SPA at `/app/` (a legacy
   server-rendered UI remains at `/panel/`).
-- **KX shim** — rendezvous proxy on TCP `21116`. Logged-in RustDesk 1.4.x
+- **KX shim** — rendezvous proxy on TCP+UDP `21116`. Logged-in RustDesk 1.4.x
   clients require a server-first `KeyExchange` handshake that OSS `hbbs`
   never sends (otherwise `Failed to secure tcp: deadline has elapsed`).
   The shim performs the server side of that handshake using your hbbs signing
@@ -134,7 +134,7 @@ One database. No microservices.
 flowchart LR
     C[RustDesk client<br/>unmodified]
     C -->|HTTP/HTTPS :8000<br/>/api/* : Bearer token| API[FastAPI app<br/>rustdesk/webapi/panel routers]
-    C -->|TCP 21116<br/>KeyExchange or plain| SHIM[KX shim<br/>supervised thread]
+    C -->|TCP+UDP 21116<br/>KX/secure, plain, datagrams| SHIM[KX shim<br/>supervised thread]
     SHIM -->|decrypted protobuf<br/>SHIM_UPSTREAM| HBBS[real hbbs rendezvous]
     C -->|/app/ :8000| SPA[Web Panel dist/]
     API -->|SQLAlchemy 2.x<br/>FK ON, busy_timeout 5000| DB[(SQLite data/base.db<br/>Alembic 0001-0002)]
@@ -266,12 +266,23 @@ point the client ID server at the shim host with the same Key as for hbbs.
 Log in and connect from the book: shim log shows `secure established`;
 logged-out connects show `plain passthrough`.
 
-Internals: on accept the shim immediately sends `KeyExchange{sign(box_pk)}`;
+Internals (TCP): on accept the shim immediately sends `KeyExchange{sign(box_pk)}`;
 a 2-key `KeyExchange` reply switches the connection to secretbox (v0
 `set_key` semantics: per-direction counters incremented before use, first
 encrypted frame uses nonce 1, empty frames pass through untouched); any other
 first frame means plain passthrough (plain clients ignore our KX via their
-`get_next_nonkeyexchange_msg`). Failures: upstream unreachable → close after
+`get_next_nonkeyexchange_msg`).
+
+Internals (UDP): the same listen port also relays rendezvous UDP datagrams
+(registration, NAT test, punch coordination) to the upstream hbbs. The UDP
+path carries no crypto by protocol design, so this is a plain forwarder:
+each client address gets its own upstream socket (replies route back
+unambiguously), idle sessions expire after 120 s, new sessions share the
+`SHIM_MAX_CONNS` / `SHIM_PER_IP_PER_MIN` caps (only session creation is
+rate-limited, keepalives are not). Verified byte-identical against direct
+hbbs replies.
+
+Failures: upstream unreachable → close after
 10 s with a warning; crash loop → `down` + `503` on ready after 5 crashes in
 10 min (backoff 1,2,4,8,16,30,60 s), API keeps serving; `/health/ready` is the
 single status source. Standalone diagnostics mode exists in `scripts/`
