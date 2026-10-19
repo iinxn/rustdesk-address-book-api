@@ -201,6 +201,8 @@ in `.env.example`.
 | `MAX_BODY_BYTES`                           | no (`5242880`)              | int                                                                | HTTP body cap → `413`                                                      | —                            |
 | `LOGIN_PER_MINUTE_PER_IP`                  | no (`20`)                   | int                                                                | Login throttle → `429`                                                     | —                            |
 | `HEARTBEAT_PER_MINUTE_PER_IP`              | no (`300`)                  | int                                                                | Heartbeat throttle → `429`                                                 | —                            |
+| `TRUSTED_PROXIES`                          | no (empty)                  | comma-separated IPs                                                | Trust `X-Forwarded-For` from these peers for rate limits; empty = ignore      | `127.0.0.1`                   |
+| `EXPOSE_DOCS`                              | no (`0`)                    | `0`/`1`                                                          | Serve `/docs`, `/redoc`, `/openapi.json` (auto-on in `DEV_MODE`)              | `0`                           |
 | `LOG_LEVEL`                                | no (`INFO`)                 | logging level                                                      | Uvicorn log level                                                             | `WARNING`                   |
 
 API↔shim wiring is exactly three values: `SHIM_LISTEN` (where clients

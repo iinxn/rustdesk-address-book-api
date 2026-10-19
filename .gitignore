@@ -17,3 +17,5 @@ id_ed25519*
 docker-compose.yml
 Dockerfile
 .secrets.env
+rustdesk.json
+SECURITY_AUDIT.md

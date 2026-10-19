@@ -15,6 +15,28 @@ from app.core.config import settings
 HITS: dict[tuple, deque] = {}
 
 
+def client_ip(request) -> str:
+    """Real client IP for rate-limit keying.
+
+    The direct peer address is used by default. `X-Forwarded-For` is honored
+    ONLY when the immediate peer is a configured trusted proxy
+    (`TRUSTED_PROXIES`, e.g. Caddy on 127.0.0.1): we then walk the chain from
+    right to left and take the first hop that is not itself a trusted proxy.
+    Without a trusted proxy the header is ignored entirely, so a spoofed XFF
+    can neither dodge the limiter nor pin a victim into a shared bucket.
+    """
+    direct = (request.client.host if request.client else "?").split("%")[0]
+    trusted = settings.trusted_proxies_set
+    if not trusted or direct not in trusted:
+        return direct
+    xff = request.headers.get("x-forwarded-for", "")
+    for hop in reversed([h.strip() for h in xff.split(",") if h.strip()]):
+        ip = hop.split("%")[0]
+        if ip not in trusted:
+            return ip
+    return direct
+
+
 class BodyCapMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         try:
@@ -36,8 +58,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self.hits = HITS
 
     def _key(self, request, prefix: str) -> tuple:
-        ip = (request.client.host if request.client else "?").split("%")[0]
-        return (prefix, ip)
+        return (prefix, client_ip(request))
 
     async def dispatch(self, request, call_next):
         for prefix, methods, attr in self.rules:

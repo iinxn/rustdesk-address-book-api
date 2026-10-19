@@ -152,7 +152,9 @@ login/login-options/heartbeat/health needs a valid token; the shim protocol
 itself has no authentication — contained by caps). Bearer tokens live only in
 client memory and the `sessions` table. `data/` is `0700`, DB/backups `0600`;
 the hbbs private key is read-only input, never committed/logged/returned.
-`X-Forwarded-*` headers are never read. hbbs is trusted for punch/relay
+`X-Forwarded-*` headers are ignored by default; only when the direct peer is a
+configured trusted proxy (`TRUSTED_PROXIES`) is `X-Forwarded-For` used, and
+then solely to key per-IP rate limits. hbbs is trusted for punch/relay
 mediation; it never sees API credentials.
 
 Repo layout: `app/` (FastAPI: `main.py`, `__main__.py`, `api/`, `core/`,
@@ -186,6 +188,8 @@ commit real values.
 | `MAX_BODY_BYTES` | `5242880` | int | Larger bodies → `413` |
 | `LOGIN_PER_MINUTE_PER_IP` | `20` | int | More logins → `429` |
 | `HEARTBEAT_PER_MINUTE_PER_IP` | `300` | int | More heartbeats → `429` |
+| `TRUSTED_PROXIES` | empty | comma-separated IPs | Trust `X-Forwarded-For` from these peers for rate-limit keying; empty = never trust it |
+| `EXPOSE_DOCS` | `0` | `0`/`1` | Serve `/docs`, `/redoc`, `/openapi.json` (auto-on in `DEV_MODE`; off in prod) |
 
 API↔shim wiring is exactly: `SHIM_LISTEN` (where clients connect),
 `SHIM_UPSTREAM` (where the real hbbs listens), `SHIM_ID_KEY` (what the shim
@@ -298,13 +302,17 @@ stays between the two RustDesk endpoints; the shim never sees it.
 ## 7. Security
 
 Enforced in code: bcrypt-only passwords; server-side sessions with logout
-revocation; per-request book ownership/rule checks; no trust in client-sent
-roles/owners; ORM + bound params + whitelisted sort; `data/` `0700`,
-DB/backups `0600` enforced at startup; Fernet device passwords, no secrets
-in logs (shim: fingerprints only); no CORS middleware (same-origin SPA);
-no `X-Forwarded-*` reads; React without `dangerouslySetInnerHTML`, Jinja
-autoescape on; error responses carry no traces/paths/SQL. Dependency labels
-at last check: `pip-audit` clean, `bandit` 0 High, `npm audit` 0 vulnerabilities.
+revocation, and automatic revocation of all of a user's tokens on disable or
+password change; per-request book ownership/rule checks; no trust in
+client-sent roles/owners; ORM + bound params + whitelisted sort; `data/`
+`0700`, DB/backups `0600` enforced at startup; Fernet device passwords, no
+secrets in logs (shim: fingerprints only); no CORS middleware (same-origin
+SPA); `X-Forwarded-*` read only from configured trusted proxies and only for
+rate-limit keying; `/docs`+`/openapi.json` disabled in prod; expired sessions
+purged; React without `dangerouslySetInnerHTML`, Jinja autoescape on; the
+legacy panel re-checks `is_disabled` on every request; error responses carry
+no traces/paths/SQL. Dependency labels at last check: `pip-audit` clean,
+`bandit` 0 High, `npm audit` 0 vulnerabilities.
 
 Known accepted limits: unauthenticated heartbeat can skew presence within its
 rate limit; legacy panel has SameSite=Lax but no

@@ -16,7 +16,16 @@ templates = Jinja2Templates(directory="app/web/templates")
 
 def panel_user(request: Request, db: Session = Depends(get_db)) -> User | None:
     uid = request.session.get("uid")
-    return db.get(User, uid) if uid else None
+    if not uid:
+        return None
+    u = db.get(User, uid)
+    # SEC-001: the cookie path must obey disable exactly like the Bearer path
+    # (`user_by_token`). A disabled/deleted user loses panel access at once;
+    # the signed cookie is cleared so the stale session does not linger.
+    if u is None or u.is_disabled:
+        request.session.clear()
+        return None
+    return u
 
 
 def require_login(request: Request, db: Session = Depends(get_db)) -> User:

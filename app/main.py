@@ -49,7 +49,16 @@ async def lifespan(app: FastAPI):
         supervisor.stop(timeout=10)
 
 
-app = FastAPI(title=settings.app_name, lifespan=lifespan)
+# SEC-008: /docs, /redoc and /openapi.json are reconnaissance material
+# (full API inventory incl. /api/v1 and panel forms). Serve them only when
+# explicitly enabled or in DEV_MODE; production defaults to 404.
+app = FastAPI(
+    title=settings.app_name,
+    lifespan=lifespan,
+    docs_url="/docs" if settings.docs_enabled else None,
+    redoc_url="/redoc" if settings.docs_enabled else None,
+    openapi_url="/openapi.json" if settings.docs_enabled else None,
+)
 app.add_middleware(BodyCapMiddleware)
 app.add_middleware(RateLimitMiddleware, rules=rate_limit_rules())
 app.add_middleware(SessionMiddleware, secret_key=settings.web_secret,

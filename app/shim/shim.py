@@ -120,9 +120,16 @@ class Gate:
         self.max_conns = max_conns
         self.per_min = per_min_per_ip
         self.hits: dict[str, deque] = {}
+        self._swept_at = time.monotonic()
 
     def admit(self, ip: str) -> bool:
         now = time.monotonic()
+        # SEC-014: UDP source IPs are spoofable, so a flood from fake addresses
+        # would otherwise grow `hits` without bound. Sweep stale buckets at most
+        # once a minute (cheap, synchronous, single-threaded event loop).
+        if now - self._swept_at > 60:
+            self._swept_at = now
+            self.sweep(now)
         q = self.hits.setdefault(ip, deque())
         while q and now - q[0] > 60:
             q.popleft()
@@ -130,6 +137,16 @@ class Gate:
             return False
         q.append(now)
         return True
+
+    def sweep(self, now: float | None = None) -> None:
+        """Drop empty/expired per-IP buckets (SEC-014)."""
+        now = time.monotonic() if now is None else now
+        for ip in list(self.hits):
+            q = self.hits[ip]
+            while q and now - q[0] > 60:
+                q.popleft()
+            if not q:
+                del self.hits[ip]
 
 
 async def pipe_plain(src, dst, tag: str):
@@ -334,12 +351,20 @@ class UdpRelay:
         self._tasks: set[asyncio.Task] = set()
         self._closed = False
 
+    def _spawn(self, coro) -> asyncio.Task:
+        # SEC-015: forget finished tasks instead of leaking them for the
+        # lifetime of the process (long-running relay).
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
+
     async def start(self, host: str, port: int):
         loop = asyncio.get_running_loop()
         transport, _ = await loop.create_datagram_endpoint(
             lambda: _ListenProto(self), local_addr=(host, port))
         self.transport = transport
-        self._tasks.add(asyncio.create_task(self._sweep()))
+        self._spawn(self._sweep())
         log.info("udp relay listening %s:%d -> %s:%d", host, port, *self.upstream)
 
     def datagram_received(self, data: bytes, addr):
@@ -363,7 +388,7 @@ class UdpRelay:
             sess = {"queue": asyncio.Queue(), "last": time.monotonic(),
                     "up": None, "pending": data}
             self.sessions[addr] = sess
-            self._tasks.add(asyncio.create_task(self._responder(addr)))
+            self._spawn(self._responder(addr))
             log.info("udp session opened for %s", ip)
             return
         sess["last"] = time.monotonic()
@@ -421,6 +446,7 @@ class UdpRelay:
             while not self._closed:
                 await asyncio.sleep(UDP_SWEEP_INTERVAL)
                 now = time.monotonic()
+                self.gate.sweep(now)  # SEC-014: guaranteed periodic purge
                 for addr, sess in list(self.sessions.items()):
                     if now - sess["last"] > UDP_IDLE_TIMEOUT:
                         self._drop(addr)

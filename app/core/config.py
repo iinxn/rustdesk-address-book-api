@@ -42,7 +42,6 @@ class Settings(BaseSettings):
     shim_id_key: str = ""
     shim_max_conns: int = 200
     shim_per_ip_per_min: int = 30
-    shim_max_conns: int = 200
     # Temporary diagnostics: log decrypted message types + target IDs
     # (never tokens/keys). Off by default.
     shim_diag_msgtypes: str = "0"
@@ -50,6 +49,14 @@ class Settings(BaseSettings):
     max_body_bytes: int = 5 * 1024 * 1024
     login_per_minute_per_ip: int = 20
     heartbeat_per_minute_per_ip: int = 300
+    # Comma-separated IPs of reverse proxies whose `X-Forwarded-For` may be
+    # trusted for per-IP rate-limit keying (e.g. "127.0.0.1" for Caddy on
+    # loopback). Empty (default) = never trust XFF: the direct peer address is
+    # always the key, so a spoofed header cannot dodge or poison the buckets.
+    trusted_proxies: str = ""
+    # Expose FastAPI's /docs, /redoc and /openapi.json. Off by default
+    # (production); DEV_MODE=1 turns them on automatically for local work.
+    expose_docs: str = "0"
 
     @property
     def resolved_database_url(self) -> str:
@@ -66,6 +73,14 @@ class Settings(BaseSettings):
     @property
     def is_dev(self) -> bool:
         return self.dev_mode == "1"
+
+    @property
+    def trusted_proxies_set(self) -> set[str]:
+        return {p.strip() for p in self.trusted_proxies.split(",") if p.strip()}
+
+    @property
+    def docs_enabled(self) -> bool:
+        return self.is_dev or self.expose_docs == "1"
 
     def require_secret(self, name: str, value: str, hint: str) -> None:
         if value or self.is_dev:

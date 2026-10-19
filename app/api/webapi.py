@@ -373,14 +373,23 @@ def update_panel_user(uid: str, body: dict, user: User = Depends(current_user), 
         if u.id == user.id and not body["is_admin"]:
             return err("cannot demote self", 400)
         u.is_admin = bool(body["is_admin"])
+    revoke_sessions = False
     if "is_disabled" in body:
         if u.id == user.id and body["is_disabled"]:
             return err("cannot disable self", 400)
         u.is_disabled = bool(body["is_disabled"])
+        revoke_sessions = revoke_sessions or u.is_disabled
     if body.get("password"):
         from app.core.security import hash_password
         u.password_hash = hash_password(str(body["password"]))
+        revoke_sessions = True
     db.commit()
+    if revoke_sessions:
+        # SEC-007: disable and password rotation must kill every live Bearer
+        # session of that user, not just the caller's. Panel cookies are
+        # already invalidated by the is_disabled check in panel_user (SEC-001).
+        from app.services.auth import destroy_user_sessions
+        destroy_user_sessions(db, u.id)
     return {"id": u.id, "username": u.username, "is_admin": u.is_admin, "is_disabled": u.is_disabled}
 
 

@@ -1,7 +1,7 @@
 """AuthService: users + opaque sessions."""
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -30,6 +30,7 @@ def authenticate(db: Session, username: str, password: str) -> User | None:
 
 
 def create_session(db: Session, user: User) -> SessionModel:
+    purge_expired_sessions(db)  # keep the table from growing (SEC-007/019)
     expires = None
     if settings.session_days > 0:
         expires = datetime.utcnow() + timedelta(days=settings.session_days)
@@ -38,6 +39,28 @@ def create_session(db: Session, user: User) -> SessionModel:
     db.commit()
     db.refresh(s)
     return s
+
+
+def destroy_user_sessions(db: Session, user_id: str) -> int:
+    """Revoke every live token of a user (disable or password rotation).
+
+    SEC-007: a password change / account disable must invalidate existing
+    Bearer sessions, not only the one that made the request."""
+    res = db.execute(delete(SessionModel).where(SessionModel.user_id == user_id))
+    db.commit()
+    return res.rowcount or 0
+
+
+def purge_expired_sessions(db: Session) -> int:
+    """Delete tokens whose expiry has passed. Returns the number removed."""
+    res = db.execute(
+        delete(SessionModel).where(
+            SessionModel.expires_at.is_not(None),
+            SessionModel.expires_at < datetime.utcnow(),
+        )
+    )
+    db.commit()
+    return res.rowcount or 0
 
 
 def user_by_token(db: Session, token: str) -> User | None:
