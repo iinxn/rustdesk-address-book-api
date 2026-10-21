@@ -12,16 +12,38 @@ from app.api.panel import _LoginRedirect
 from app.core import logging as _logging  # noqa: F401
 from app.core.config import settings
 from app.core.middleware import BodyCapMiddleware, RateLimitMiddleware, rate_limit_rules
+from app.db.session import SessionLocal
+from app.services import discovery as discovery_svc
 from app.shim_supervisor import ShimSupervisor
 
 log = logging.getLogger(__name__)
 supervisor: ShimSupervisor | None = None
 
 
+def _drain_discovery_once() -> None:
+    db = SessionLocal()
+    try:
+        discovery_svc.drain_once(db)
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global supervisor
     monitor_task = None
+    discovery_task = None
+    # No TCP connection from a previous process can still be alive.
+    if settings.discovery_enabled == "1":
+        try:
+            with SessionLocal() as db:
+                discovery_svc.reset_online(db)
+        except Exception as e:
+            log.warning("discovery reset failed: %r", e)
+
     if settings.shim_enabled == "1":
         host, _port = settings.shim_listen.rsplit(":", 1)
         if host not in ("127.0.0.1", "localhost", "::1"):
@@ -42,9 +64,24 @@ async def lifespan(app: FastAPI):
                 await supervisor.watch()
 
         monitor_task = asyncio.create_task(_watch())
+
+    if settings.discovery_enabled == "1":
+        async def _drain_loop():
+            while True:
+                await asyncio.sleep(2)
+                try:
+                    await asyncio.to_thread(_drain_discovery_once)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    log.warning("discovery drain failed: %r", e)
+
+        discovery_task = asyncio.create_task(_drain_loop())
     yield
     if monitor_task is not None:
         monitor_task.cancel()
+    if discovery_task is not None:
+        discovery_task.cancel()
     if supervisor is not None:
         supervisor.stop(timeout=10)
 

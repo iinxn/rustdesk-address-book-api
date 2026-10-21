@@ -1,17 +1,21 @@
 """RustDesk Client compatibility API. Mirrors Server Pro shapes from
 docs/en.md §5. Error shape is always {"error": msg}."""
+import json
+
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import bearer_token, current_user
 from app.core.config import settings
+from app.core.middleware import client_ip
 from app.db.session import get_db
 from app.models.models import AddressBook, AddressBookEntry, EntryTag, Tag, User
 from app.schemas.rustdesk import LoginIn
 from app.core.validators import validate_rustdesk_id
 from app.services import ab as ab_svc
+from app.services import device_info as info_svc
 from app.services import presence as presence_svc
 from app.services.auth import authenticate, create_session, destroy_session, user_by_token
 
@@ -336,21 +340,62 @@ async def ab_tag_delete(guid: str, request: Request, user: User = Depends(curren
     return ok_empty()
 
 
-# --- device heartbeat (presence source, see PresenceService) ---
+# --- device heartbeat + sysinfo (presence/inventory sources, see services) ---
 
 @router.post("/api/heartbeat")
 async def heartbeat(request: Request, db: Session = Depends(get_db)):
     """Unauthenticated by design: controlled devices post {"id","uuid","ver",...}
     every 15s when a custom api-server is configured. We stamp last_seen on
-    matching entries and return {} (client only looks for sysinfo/disconnect keys)."""
+    matching entries, refresh liveness of an existing info row, and optionally
+    ask for a sysinfo re-upload ({"sysinfo": true})."""
     try:
         data = await request.json()
     except Exception:
         return {}
-    rid = str(data.get("id", "")) if isinstance(data, dict) else ""
-    if rid:
+    if not isinstance(data, dict):
+        return {}
+    rid = str(data.get("id", "")).strip()
+    if rid and validate_rustdesk_id(rid) is None:
         presence_svc.record_heartbeat(db, rid)
+        info_svc.record_heartbeat(db, rid, str(data.get("ver", "")), client_ip(request))
+        if info_svc.take_refresh(rid):
+            return {"sysinfo": True}
     return {}
+
+
+@router.post("/api/sysinfo_ver")
+async def sysinfo_ver():
+    """Version probe used by the stock client for public API servers."""
+    return PlainTextResponse(info_svc.SYSINFO_VER,
+                             headers={"Cache-Control": "no-store"})
+
+
+@router.post("/api/sysinfo")
+async def sysinfo(request: Request, db: Session = Depends(get_db)):
+    """Stock-client inventory upload (no auth by design).
+
+    Only a small whitelist is stored; `uuid` and all preset/option keys (some
+    carry address-book passwords) are discarded. The exact response string is
+    part of the client contract.
+    """
+    raw = await request.body()
+    if len(raw) > 32 * 1024:
+        return PlainTextResponse("ID_NOT_FOUND", status_code=413)
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return PlainTextResponse("ID_NOT_FOUND", status_code=400)
+    if not isinstance(data, dict):
+        return PlainTextResponse("ID_NOT_FOUND", status_code=400)
+    rid = str(data.get("id", "")).strip()
+    if validate_rustdesk_id(rid) is not None:
+        # Pro returns ID_NOT_FOUND for unknown/invalid devices; the client then
+        # retries after its normal timeout. Never echo the supplied value.
+        return PlainTextResponse("ID_NOT_FOUND",
+                                 headers={"Cache-Control": "no-store"})
+    info_svc.save_sysinfo(db, rid, data, client_ip(request))
+    return PlainTextResponse("SYSINFO_UPDATED",
+                             headers={"Cache-Control": "no-store"})
 
 
 # --- legacy stubs ---

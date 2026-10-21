@@ -120,6 +120,40 @@ def sync_entry_tags(db: Session, entry: AddressBookEntry, tag_names: list[str]) 
             db.delete(r)
 
 
+def add_entry_tags(db: Session, entry: AddressBookEntry, tag_names: list[str]) -> None:
+    """Add tags, keeping every tag the entry already had."""
+    clean = sorted({t.strip() for t in tag_names if t and t.strip()})
+    if not clean:
+        return
+    existing = {t.name: t for t in db.scalars(select(Tag).where(Tag.address_book_id == entry.address_book_id))}
+    current = {r.tag_id for r in db.scalars(select(EntryTag).where(EntryTag.entry_id == entry.id))}
+    for name in clean:
+        t = existing.get(name)
+        if t is None:
+            t = Tag(address_book_id=entry.address_book_id, name=name, color=0)
+            db.add(t)
+            db.flush()
+            existing[name] = t
+        if t.id not in current:
+            db.add(EntryTag(entry_id=entry.id, tag_id=t.id))
+            current.add(t.id)
+
+
+def remove_entry_tags(db: Session, entry: AddressBookEntry, tag_names: list[str]) -> None:
+    """Detach only the named tags; tag rows and other links are untouched."""
+    clean = {t.strip() for t in tag_names if t and t.strip()}
+    if not clean:
+        return
+    tags = db.scalars(select(Tag).where(
+        Tag.address_book_id == entry.address_book_id,
+        Tag.name.in_(clean),
+    )).all()
+    for tag in tags:
+        link = db.get(EntryTag, (entry.id, tag.id))
+        if link is not None:
+            db.delete(link)
+
+
 def apply_peer_update(db: Session, entry: AddressBookEntry, data: dict, book: AddressBook) -> None:
     if "alias" in data and isinstance(data["alias"], str):
         entry.alias = data["alias"]

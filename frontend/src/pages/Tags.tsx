@@ -68,7 +68,7 @@ export default function Tags() {
         <button onClick={() => { setName(''); setCreating(true); }} className={btn}>+ Create tag</button>
       </div>
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <select value={book} onChange={(e) => setBook(e.target.value)} className={`${input} w-auto`}>
+        <select aria-label="Address book" value={book} onChange={(e) => setBook(e.target.value)} className={`${input} sm:w-auto`}>
           {books.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
         </select>
       </div>

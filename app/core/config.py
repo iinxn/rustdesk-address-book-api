@@ -16,7 +16,7 @@ LOGS_DIR = BASE_DIR / "logs"
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    app_name: str = "RustDesk Manager"
+    app_name: str = "RustDesk API"
     # Dev escape hatch: when "1", insecure secret defaults are tolerated.
     # Production MUST run with DEV_MODE unset/0 and real secrets.
     dev_mode: str = "0"
@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     max_body_bytes: int = 5 * 1024 * 1024
     login_per_minute_per_ip: int = 20
     heartbeat_per_minute_per_ip: int = 300
+    # /api/sysinfo is unauthenticated by design (stock clients send no auth).
+    sysinfo_per_minute_per_ip: int = 60
+    # Shim discovery registry (shim -> SQLite). On by default. The shim still
+    # applies its own per-IP limits before publishing anything.
+    discovery_enabled: str = "1"
+    discovery_online_sec: int = 180
     # Comma-separated IPs of reverse proxies whose `X-Forwarded-For` may be
     # trusted for per-IP rate-limit keying (e.g. "127.0.0.1" for Caddy on
     # loopback). Empty (default) = never trust XFF: the direct peer address is

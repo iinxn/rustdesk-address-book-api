@@ -1,4 +1,4 @@
-# RustDesk Manager
+# RustDesk API
 
 Self-hosted **Address Book API** for the stock RustDesk client, plus a **Web Panel**
 and a **KX shim** that lets logged-in clients complete the secure rendezvous
@@ -7,7 +7,15 @@ handshake against an OSS `hbbs`.
 - **No RustDesk client modifications.** The client talks to this project exactly
   like it talks to the official server API.
 - **One database.** Everything (users, books, devices, tags, sessions) lives in
-  SQLite at `data/base.db`, migrated with Alembic.
+  SQLite at `data/base.db` by default, migrated with Alembic. Existing installs
+  may set `DATABASE_URL` to another SQLite file (for example
+  `data/pc-service.db`); keep that setting so existing data stays visible.
+- **Discovery without client changes.** The KX shim records RustDesk IDs seen
+  in rendezvous `register_peer` / `register_pk` messages. No client API address
+  is needed for this part, and records persist after disconnect.
+- **Optional client inventory.** Stock clients that use this server as their
+  `api-server` upload hostname, username, OS, CPU, total RAM and client version
+  via `/api/sysinfo`. Missing facts are shown as `Not reported`, never invented.
 - **One command to run.** `python -m app` (or `./scripts/start.sh`) starts the
   API, serves the Web Panel, and supervises the shim.
 

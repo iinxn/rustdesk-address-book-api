@@ -80,4 +80,5 @@ def rate_limit_rules():
     return [
         ("/api/login", ("POST",), "login_per_minute_per_ip"),
         ("/api/heartbeat", ("POST",), "heartbeat_per_minute_per_ip"),
+        ("/api/sysinfo", ("POST",), "sysinfo_per_minute_per_ip"),
     ]

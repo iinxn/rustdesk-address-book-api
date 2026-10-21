@@ -15,10 +15,13 @@ import asyncio
 import base64
 import hashlib
 import logging
+import os
 import struct
 import time
 from collections import deque
 
+from app.core.validators import validate_rustdesk_id
+from app.services.discovery_events import publish as _publish_discovery
 from app.shim import rendezvous_pb2 as rz
 from nacl.bindings import (
     crypto_box,
@@ -35,6 +38,14 @@ READ_TIMEOUT = 60.0
 MAX_FRAME = 2 * 1024 * 1024
 MAX_CONNS = 200
 MAX_CONNS_PER_MIN_PER_IP = 30
+# Discovery: parse only small rendezvous control frames, never bulk traffic.
+DISCOVERY_MAX_PARSE = 4096
+# A single source IP may introduce at most this many *new* IDs per minute.
+# Repeat "seen" events for already-known IDs are free (so keepalives work).
+DISCOVERY_NEW_IDS_PER_IP_PER_MIN = int(
+    os.environ.get("DISCOVERY_NEW_IDS_PER_IP_PER_MIN", "30")
+)
+DISCOVERY_REMEMBER_SEC = 1800.0
 
 log = logging.getLogger("kx-shim")
 
@@ -149,6 +160,131 @@ class Gate:
                 del self.hits[ip]
 
 
+# --- discovery (rendezvous evidence only; never tokens/keys) ---
+#
+# The shim sees the sender's *own* ID only in RegisterPk/RegisterPeer. Other
+# messages (PunchHoleRequest, RequestRelay) carry the *target* ID and must
+# never be attributed to the sender.
+
+def _sender_id(payload: bytes) -> str | None:
+    if not payload or len(payload) > DISCOVERY_MAX_PARSE:
+        return None
+    try:
+        m = rz.RendezvousMessage()
+        m.ParseFromString(payload)
+        kind = m.WhichOneof("union")
+        if kind == "register_peer":
+            rid = m.register_peer.id
+        elif kind == "register_pk":
+            rid = m.register_pk.id
+        else:
+            return None
+        rid = (rid or "").strip()
+        if validate_rustdesk_id(rid) is not None:
+            return None
+        return rid
+    except Exception:
+        return None
+
+
+class _DiscoveryGuard:
+    """Rate-limit *new* IDs per source IP, allow repeat sightings freely."""
+
+    def __init__(self) -> None:
+        self.hits: dict[str, deque] = {}
+        self.known: dict[str, dict[str, float]] = {}
+        self._swept_at = time.monotonic()
+
+    def admit(self, ip: str, rid: str) -> bool:
+        now = time.monotonic()
+        if now - self._swept_at > 60:
+            self._swept_at = now
+            self._sweep(now)
+        known = self.known.setdefault(ip, {})
+        last = known.get(rid)
+        if last is not None and now - last < DISCOVERY_REMEMBER_SEC:
+            known[rid] = now
+            return True
+        q = self.hits.setdefault(ip, deque())
+        while q and now - q[0] > 60:
+            q.popleft()
+        if len(q) >= DISCOVERY_NEW_IDS_PER_IP_PER_MIN:
+            return False
+        q.append(now)
+        known[rid] = now
+        return True
+
+    def _sweep(self, now: float) -> None:
+        for ip, q in list(self.hits.items()):
+            while q and now - q[0] > 60:
+                q.popleft()
+            if not q:
+                self.hits.pop(ip, None)
+        for ip, known in list(self.known.items()):
+            for rid, last in list(known.items()):
+                if now - last >= DISCOVERY_REMEMBER_SEC:
+                    known.pop(rid, None)
+            if not known:
+                self.known.pop(ip, None)
+
+
+_GUARD = _DiscoveryGuard()
+# id -> tokens of live TCP connections that identified themselves with it.
+_ID_CONNS: dict[str, set[object]] = {}
+
+
+class _ConnTracker:
+    """Per-TCP-connection observation: learn the ID, keep liveness, close once."""
+
+    def __init__(self, ip: str):
+        self.ip = ip or "?"
+        self.token = object()
+        self.ids: set[str] = set()
+        self.closed = False
+
+    def observe(self, payload: bytes) -> None:
+        rid = _sender_id(payload)
+        if rid is not None:
+            if rid not in self.ids:
+                if not _GUARD.admit(self.ip, rid):
+                    return
+                self.ids.add(rid)
+                conns = _ID_CONNS.setdefault(rid, set())
+                conns.add(self.token)
+                # First live connection for this ID -> connect, otherwise just
+                # a sighting (another connection already keeps it online).
+                _publish_discovery("connect" if len(conns) == 1 else "seen",
+                                   rid, self.ip, "tcp")
+            else:
+                _publish_discovery("seen", rid, self.ip, "tcp")
+        elif self.ids:
+            # Keepalive/other frame on an identified connection: still alive.
+            for known in self.ids:
+                _publish_discovery("seen", known, self.ip, "tcp")
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        for rid in list(self.ids):
+            conns = _ID_CONNS.get(rid)
+            if conns is not None:
+                conns.discard(self.token)
+            if not conns:
+                _ID_CONNS.pop(rid, None)
+                _publish_discovery("disconnect", rid, self.ip, "tcp")
+        self.ids.clear()
+
+
+def _observe_udp(data: bytes, ip: str) -> None:
+    rid = _sender_id(data)
+    if rid is None:
+        return
+    if not _GUARD.admit(ip, rid):
+        return
+    _publish_discovery("seen", rid, ip, "udp")
+
+
 async def pipe_plain(src, dst, tag: str):
     try:
         while True:
@@ -166,7 +302,8 @@ async def pipe_plain(src, dst, tag: str):
         log.warning("%s pipe error: %r", tag, e)
 
 
-async def pipe_c2s(reader, writer, crypt: SessionCrypt, diag: bool, peer):
+async def pipe_c2s(reader, writer, crypt: SessionCrypt, diag: bool,
+                   peer, tracker: _ConnTracker | None = None):
     try:
         while True:
             p = await frame_decode(reader)
@@ -177,6 +314,11 @@ async def pipe_c2s(reader, writer, crypt: SessionCrypt, diag: bool, peer):
             except Exception:
                 log.warning("c2s decrypt failed, closing")
                 break
+            if tracker is not None:
+                try:
+                    tracker.observe(plain)
+                except Exception as e:  # never break the protocol on a parser bug
+                    log.debug("discovery observe error: %r", e)
             if diag:
                 _log_msg("c2s", peer, plain)
             writer.write(frame_encode(plain))
@@ -286,29 +428,36 @@ async def _handle(conn_r, conn_w, upstream, sign_sk: bytes, peer, diag: bool = F
             conn_w.close()
             up_w.close()
             return
-    if mode == "plain":
-        log.info("%s: plain passthrough (%s)", peer, kind)
-        up_w.write(frame_encode(rest))
-        await up_w.drain()
-        await asyncio.gather(
-            pipe_plain(conn_r, up_w, "c2s-plain"),
-            pipe_plain(up_r, conn_w, "s2c-plain"),
-        )
-    elif crypt is not None:
-        await asyncio.gather(
-            pipe_c2s(conn_r, up_w, crypt, diag, peer),
-            pipe_s2c(up_r, conn_w, crypt),
-        )
-    else:
-        log.warning("%s: no crypt in secure mode, close", peer)
-        conn_w.close()
-        up_w.close()
-        return
-    for w in (conn_w, up_w):
-        try:
-            w.close()
-        except Exception:
-            pass
+    ip = peer[0] if peer else "?"
+    tracker = _ConnTracker(ip)
+    try:
+        if mode == "plain":
+            log.info("%s: plain passthrough (%s)", peer, kind)
+            try:
+                tracker.observe(rest)
+            except Exception as e:
+                log.debug("discovery observe error: %r", e)
+            up_w.write(frame_encode(rest))
+            await up_w.drain()
+            await asyncio.gather(
+                pipe_plain(conn_r, up_w, "c2s-plain"),
+                pipe_plain(up_r, conn_w, "s2c-plain"),
+            )
+        elif crypt is not None:
+            await asyncio.gather(
+                pipe_c2s(conn_r, up_w, crypt, diag, peer, tracker),
+                pipe_s2c(up_r, conn_w, crypt),
+            )
+        else:
+            log.warning("%s: no crypt in secure mode, close", peer)
+            return
+    finally:
+        tracker.close()
+        for w in (conn_w, up_w):
+            try:
+                w.close()
+            except Exception:
+                pass
     log.info("%s: closed (%s)", peer, mode)
 
 
@@ -376,6 +525,10 @@ class UdpRelay:
     def _on_datagram(self, data: bytes, addr):
         if self._closed or len(data) > UDP_MAX_DATAGRAM:
             return
+        try:
+            _observe_udp(data, addr[0])
+        except Exception as e:
+            log.debug("discovery udp observe error: %r", e)
         sess = self.sessions.get(addr)
         if sess is None:
             ip = addr[0]
@@ -483,6 +636,8 @@ async def amain(args):
     uh, up = args.upstream.rsplit(":", 1)
     sign_sk = load_sign_sk(args.id_key)
     gate = Gate(args.max_conns, args.per_ip_per_min)
+    # A restarted shim has no live TCP connections from the previous run.
+    _publish_discovery("reset", "*")
     log.info("signing with hbbs key (pub=%s…)", base64.b64encode(sign_sk[32:]).decode()[:12])
     relay = UdpRelay((uh, int(up)), gate)
     await relay.start(host, int(port))

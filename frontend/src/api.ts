@@ -41,8 +41,13 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
     throw new ApiError(401, 'Unauthorized');
   }
   const text = await r.text();
-  const data = text ? JSON.parse(text) : {};
-  if (!r.ok) throw new ApiError(r.status, data.detail || data.error || `HTTP ${r.status}`);
+  let data: Record<string, unknown> = {};
+  try {
+    data = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+  } catch {
+    data = {};
+  }
+  if (!r.ok) throw new ApiError(r.status, String(data.detail || data.error || `HTTP ${r.status}`));
   return data as T;
 }
 
@@ -72,6 +77,23 @@ export const api = {
   createEntry: (bid: string, b: unknown) => req<import('./types').Device>('POST', `/api/v1/address-books/${bid}/entries`, b),
   updateEntry: (id: string, b: unknown) => req<import('./types').Device>('PUT', `/api/v1/entries/${id}`, b),
   deleteEntry: (id: string) => req<{ ok: boolean }>('DELETE', `/api/v1/entries/${id}`),
+  bulkDelete: (ids: string[]) =>
+    req<import('./types').BulkDeleteResult>('POST', '/api/v1/entries/bulk-delete', { ids }),
+  bulkTags: (ids: string[], add: string[], remove: string[]) =>
+    req<import('./types').BulkTagsResult>('POST', '/api/v1/entries/bulk-tags', { ids, add, remove }),
+  discovered: (q: { search?: string; status?: string; page?: number; page_size?: number; only_unlinked?: number }) => {
+    const p = new URLSearchParams();
+    for (const [k, v] of Object.entries(q)) if (v !== '' && v !== undefined) p.set(k, String(v));
+    return req<import('./types').Page<import('./types').DiscoveredDevice>>('GET', `/api/v1/discovered?${p}`);
+  },
+  addDiscovered: (rid: string, b: unknown) =>
+    req<import('./types').Device>('POST', `/api/v1/discovered/${encodeURIComponent(rid)}/add`, b),
+  forgetDiscovered: (rid: string) =>
+    req<{ ok: boolean }>('DELETE', `/api/v1/discovered/${encodeURIComponent(rid)}`),
+  deviceInfo: (rid: string) =>
+    req<import('./types').DeviceDetail>('GET', `/api/v1/device-info/${encodeURIComponent(rid)}`),
+  refreshInfo: (rid: string) =>
+    req<{ ok: boolean; expires_in: number }>('POST', `/api/v1/device-info/${encodeURIComponent(rid)}/refresh`),
   tags: (bid: string) => req<import('./types').TagRow[]>('GET', `/api/v1/address-books/${bid}/tags`),
   createTag: (bid: string, b: unknown) => req<unknown>('POST', `/api/v1/address-books/${bid}/tags`, b),
   updateTag: (id: string, b: unknown) => req<unknown>('PUT', `/api/v1/tags/${id}`, b),

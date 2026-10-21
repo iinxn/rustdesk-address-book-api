@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class AddressBookOut(BaseModel):
@@ -50,3 +50,20 @@ class UserOut(BaseModel):
     is_admin: bool = False
     is_disabled: bool = False
     model_config = {"from_attributes": True}
+
+
+class BulkIdsIn(BaseModel):
+    ids: list[str] = Field(default_factory=list)
+
+
+class BulkTagsIn(BaseModel):
+    ids: list[str] = Field(default_factory=list)
+    add: list[str] = Field(default_factory=list)
+    remove: list[str] = Field(default_factory=list)
+
+
+class DiscoveredAddIn(BaseModel):
+    book_id: str
+    alias: str = ""
+    note: str = ""
+    tags: list[str] = Field(default_factory=list)

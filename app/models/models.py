@@ -7,6 +7,7 @@ from datetime import datetime
 from sqlalchemy import (
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -128,3 +129,53 @@ class AddressBookPermission(Base):
     rule: Mapped[int] = mapped_column(Integer, default=1)  # 1=read 2=readWrite 3=fullControl
 
     book: Mapped[AddressBook] = relationship(back_populates="permissions")
+
+
+class DiscoveredDevice(Base):
+    """Rendezvous evidence seen by the KX shim (independent from address books).
+
+    A row means "this RustDesk ID connected to our shim at least once". It is
+    NOT proof of identity and it is NOT a system-inventory record. Rows are
+    kept after disconnect; `online` is maintained by the shim's connection
+    lifecycle plus a staleness sweep.
+    """
+    __tablename__ = "discovered_devices"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    rustdesk_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    first_seen: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    last_seen: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    last_connected: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_disconnected: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_ip: Mapped[str] = mapped_column(String(64), default="")
+    source: Mapped[str] = mapped_column(String(16), default="")  # "tcp", "udp" or "tcp,udp"
+    seen_count: Mapped[int] = mapped_column(Integer, default=0)
+    online: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
+
+class DeviceInfo(Base):
+    """System facts uploaded by the stock RustDesk client to /api/sysinfo.
+
+    Only whitelisted, non-secret fields are persisted (never uuid, preset
+    passwords or other option payloads). The raw client string is kept next to
+    conservatively parsed values so the UI never invents data.
+    """
+    __tablename__ = "device_info"
+
+    rustdesk_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    hostname: Mapped[str] = mapped_column(String(128), default="")
+    username: Mapped[str] = mapped_column(String(128), default="")
+    os: Mapped[str] = mapped_column(String(255), default="")
+    os_name: Mapped[str] = mapped_column(String(128), default="")
+    os_version: Mapped[str] = mapped_column(String(255), default="")
+    cpu: Mapped[str] = mapped_column(String(255), default="")
+    cpu_model: Mapped[str] = mapped_column(String(255), default="")
+    cpu_freq_ghz: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cpu_logical: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cpu_physical: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    memory: Mapped[str] = mapped_column(String(64), default="")
+    memory_gb: Mapped[float | None] = mapped_column(Float, nullable=True)
+    version: Mapped[str] = mapped_column(String(32), default="")
+    ip: Mapped[str] = mapped_column(String(64), default="")
+    collected_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

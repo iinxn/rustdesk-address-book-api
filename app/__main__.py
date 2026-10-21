@@ -6,6 +6,7 @@
 import logging
 import os
 import sys
+from pathlib import Path
 
 # Make `python -m app` work from any directory: anchor imports at project root.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -14,13 +15,17 @@ log = logging.getLogger("app.boot")
 
 
 def ensure_dirs() -> None:
-    from app.core.config import BASE_DIR, DATA_DIR, LOGS_DIR
+    from app.core.config import DATA_DIR, LOGS_DIR, settings
     for d in (DATA_DIR, LOGS_DIR):
         d.mkdir(parents=True, exist_ok=True)
     os.chmod(DATA_DIR, 0o700)
-    db = DATA_DIR / "base.db"
-    if db.exists():
-        os.chmod(db, 0o600)
+    # Tighten whichever SQLite database the configured URL actually uses
+    # (installations may keep data in data/pc-service.db, not only base.db).
+    url = settings.resolved_database_url
+    if url.startswith("sqlite:///"):
+        db = Path(url[len("sqlite:///"):])
+        if db.exists() and db.is_file():
+            os.chmod(db, 0o600)
 
 
 def run_migrations() -> None:
@@ -40,6 +45,8 @@ def main() -> None:
     ensure_dirs()
     # 3. migrations
     run_migrations()
+    # The SQLite file may have been created by Alembic just now; tighten it.
+    ensure_dirs()
     log.info("migrations ok")
     # 4. serve
     import uvicorn

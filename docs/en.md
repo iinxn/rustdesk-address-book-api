@@ -1,4 +1,4 @@
-# RustDesk Manager — Documentation (English)
+# RustDesk API — Documentation (English)
 
 > [Русская версия](ru.md)
 
@@ -137,7 +137,7 @@ flowchart LR
     C -->|TCP+UDP 21116<br/>KX/secure, plain, datagrams| SHIM[KX shim<br/>supervised thread]
     SHIM -->|decrypted protobuf<br/>SHIM_UPSTREAM| HBBS[real hbbs rendezvous]
     C -->|/app/ :8000| SPA[Web Panel dist/]
-    API -->|SQLAlchemy 2.x<br/>FK ON, busy_timeout 5000| DB[(SQLite data/base.db<br/>Alembic 0001-0002)]
+    API -->|SQLAlchemy 2.x<br/>FK ON, busy_timeout 5000| DB[(SQLite data/base.db<br/>Alembic 0001-0004)]
 ```
 
 Request flow: `POST /api/login` → opaque server-side token (`sessions`,
@@ -188,6 +188,9 @@ commit real values.
 | `MAX_BODY_BYTES` | `5242880` | int | Larger bodies → `413` |
 | `LOGIN_PER_MINUTE_PER_IP` | `20` | int | More logins → `429` |
 | `HEARTBEAT_PER_MINUTE_PER_IP` | `300` | int | More heartbeats → `429` |
+| `SYSINFO_PER_MINUTE_PER_IP` | `60` | int | More `/api/sysinfo` uploads → `429` |
+| `DISCOVERY_ENABLED` | `1` | `0`/`1` | Drain shim discovery events into SQLite |
+| `DISCOVERY_ONLINE_SEC` | `180` | int | Mark silent discovered devices offline after this many seconds |
 | `TRUSTED_PROXIES` | empty | comma-separated IPs | Trust `X-Forwarded-For` from these peers for rate-limit keying; empty = never trust it |
 | `EXPOSE_DOCS` | `0` | `0`/`1` | Serve `/docs`, `/redoc`, `/openapi.json` (auto-on in `DEV_MODE`; off in prod) |
 
@@ -208,7 +211,7 @@ SHIM_ID_KEY=/opt/keys/hbbs-id_ed25519
 ## 5. API reference
 
 Verified against `app/api/*.py`; live schema at `/docs`. Auth: opaque Bearer
-(except login, login-options, heartbeat, health). Errors: `401 {"error"}` and
+(except login, login-options, heartbeat, sysinfo, sysinfo_ver, health). Errors: `401 {"error"}` and
 RustDesk `{"error"}` with 400/403/404/409.
 
 **RustDesk contract** (used by the unmodified client — shapes are frozen):
