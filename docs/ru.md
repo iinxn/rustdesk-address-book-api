@@ -37,7 +37,10 @@ handshake против OSS `hbbs`. **Клиент RustDesk не изменяет
   трафик в настоящий `hbbs`. Клиенты без логина (plain) идут транзитом.
 - **Хранилище** — одна SQLite-база `data/base.db`, миграции Alembic.
 
-Возможности и ограничения версии: без Docker; без встроенной TLS-терминации
+Возможности и ограничения версии: Docker-файлы есть в рабочем каталоге
+(`Dockerfile`, `docker-compose.yml`, `.dockerignore`), но сейчас перечислены в
+`.gitignore`, поэтому чистый клон не сможет собрать образ, пока их не добавят
+в git; без встроенной TLS-терминации
 (спереди Caddy/Nginx); в legacy
 панели нет per-form CSRF-токенов (только SameSite=Lax); presence через
 heartbeat подделываем в пределах лимита (credentials у устройств нет по
@@ -46,7 +49,8 @@ heartbeat подделываем в пределах лимита (credentials �
 ## 2. Быстрый старт
 
 Debian/Ubuntu, Python 3.13, root не нужен (все дефолтные порты > 1024).
-Docker нет. Для опциональной пересборки React: Node.js 22 LTS.
+Docker опционален (файлы есть в рабочем каталоге, см. `README.md`), но сейчас
+они не отслеживаются git. Для опциональной пересборки React: Node.js 22 LTS.
 
 Из корня репозитория — команды по одной, чтобы ошибку было легко найти:
 
@@ -100,7 +104,8 @@ curl http://127.0.0.1:8000/health/ready
 → `{"status":"ready","db":"up","shim":{"state":"disabled"}}`
 (`disabled` без шима — норма; с шимом `running/alive:true`;
 `down` после серии падений — см. §9). Панель: `http://127.0.0.1:8000/app/`.
-Интерактивные доки API: `http://127.0.0.1:8000/docs`.
+Интерактивные доки API **выключены по умолчанию**; они доступны только при
+`DEV_MODE=1` или `EXPOSE_DOCS=1` (`http://127.0.0.1:8000/docs`).
 
 Первый админ (второй терминал, сервер работает) и первый запрос:
 
@@ -122,8 +127,9 @@ curl -X POST http://127.0.0.1:8000/api/ab/personal \
 → `200 {"guid":"…"}`.
 
 Остановка: `Ctrl+C` (SIGTERM аналогично — API завершает запросы, поток шима
-стопится с join 10 с, сирот нет) или `./scripts/stop.sh` (PID-файл
-`data/app.pid`). Перезапуск — та же команда; миграции идемпотентны.
+стопится с join 10 с, сирот нет) или `./scripts/stop.sh` (проверяет PID-файл
+по живому `python -m app`, затем ищет процесс по cwd/cmdline). Перезапуск —
+та же команда; миграции идемпотентны.
 
 ## 3. Архитектура
 
@@ -145,12 +151,14 @@ flowchart LR
 (доступ к книге перепроверяется при каждом запросе: `get_book_for_user` +
 `rule_for`) → устройства шлют `POST /api/heartbeat {id,…}`, штампуется
 `last_seen` (вывод: `online` ≤ 45 с, иначе `offline`, не виденные — `unknown`)
-→ SPA панели ходит в `/api/v1/*` с тем же токеном из памяти.
+→ SPA панели ходит в `/api/v1/*` с тем же токеном из `localStorage`
+(`ab_token`).
 
 Границы доверия: сеть недоверенная (все `/api/*`, кроме login/login-options/
 heartbeat/health, требуют валидный токен; в протоколе шима аутентификации нет
-— сдерживается лимитами). Bearer-токены — только в памяти клиента и таблице
-`sessions`. `data/` — `0700`, БД/бэкапы — `0600`; приватник hbbs — только
+— сдерживается лимитами). Bearer-токены — в `localStorage` браузера
+(`ab_token`) и таблице `sessions`. `data/` — `0700`, БД/бэкапы — `0600`;
+приватник hbbs — только
 чтение, никогда в git/логи/ответы. Заголовки `X-Forwarded-*` по умолчанию
 игнорируются; только если прямой пир — настроенный доверенный прокси
 (`TRUSTED_PROXIES`), `X-Forwarded-For` используется, и лишь для ключа
@@ -244,7 +252,7 @@ RustDesk `{"error"}` с 400/403/404/409.
 
 | Метод | Путь | Примечания |
 |---|---|---|
-| GET | `/stats` | `{devices,online,offline,unknown}` по видимым книгам |
+| GET | `/stats` | `{devices,online,offline,unknown,discovered,discovered_online}`; счётчики книг — по видимым, discovered — server-wide |
 | GET/POST | `/address-books` | список со счётчиками и твоим `rule`; создание `{name}` (admin, shared) |
 | PUT/DELETE | `/address-books/{bid}` | rename / delete shared-книги, только fullControl (rule 3); личные нельзя ни переименовать, ни удалить |
 | GET | `/address-books/{bid}/entries` | `search,tag[] (повтор),mode=and\|or,untagged,presence=all\|online\|offline\|unknown,sort=alias\|rustdesk_id\|last_seen\|status,order,page,page_size(≤200)` → `{total,data}` с `tag_objs[{name,color}]`, `presence`, `last_seen`, `password_configured`, timestamps |
@@ -331,15 +339,17 @@ dev-сервер фронта (`npm run dev`) проксирует `/api` на `
 Состав: `app/` (FastAPI: `main.py`, `__main__.py`, `api/`, `core/`, `models/`,
 `schemas/`, `services/`, `db/`, `cli.py`, `shim/`, `shim_supervisor.py`,
 `web/templates/`), `frontend/` (`src/`, собранный `dist/`), `alembic/`
-(0001_init, 0002_last_seen), `scripts/` (`start.sh`/`stop.sh` + …),
+(0001–0004), `scripts/` (`start.sh`/`stop.sh` + …),
 `config/` (примеры Caddy/systemd), `data/` + `logs/` (рантайм).
 
 ## 9. Troubleshooting
 
-Порядок: `logs/app.log` → `/health/ready` → порты → конфиг.
+Порядок: stdout/stderr (`journalctl` или `docker compose logs`) →
+`/health/ready` → порты → конфиг. Файл `logs/app.log` приложение не создаёт.
 `FATAL: …SECRET…` — заполнить `.env` (или `DEV_MODE=1` для экспериментов).
 `No module named app` — запуск из корня / через `start.sh`. Порт занят —
-`ss -tlnp`, остановить держателя (`stop.sh` убивает только PID-файловые).
+`ss -tlnp`, остановить держателя (`stop.sh` проверяет PID + cwd/cmdline и
+ищет `python -m app`).
 Crash-loop шима на bind — освободить `SHIM_LISTEN` или увести `hbbs`.
 **`SHIM_LISTEN` на чужом IP биндиться не может** (`Cannot assign requested
 address` — наблюдено живьём); **`SHIM_ID_KEY` обязан быть 64-байтным приватным

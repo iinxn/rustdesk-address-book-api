@@ -170,6 +170,11 @@ Needs Docker Engine + Compose plugin on the build/run machine (not on dev box).
 The image builds the React panel itself (multi-stage, no local `dist/` needed)
 and runs as non-root. The database stays on the host, never in the container.
 
+> **Before you rely on this:** `Dockerfile`, `docker-compose.yml` and
+> `.dockerignore` are currently listed in `.gitignore`, so a fresh clone does
+> not contain them. Add those files to git (and remove the ignore entries) if
+> the Docker path must be reproducible.
+
 ```bash
 mkdir -p data keys && chmod 700 data
 # DEVICE_SECRET + WEB_SECRET можно оставить CHANGEME — entrypoint сгенерирует
@@ -203,7 +208,7 @@ in `.env.example`.
 | `MAX_PEER_ONE_AB`                          | no (`0` = unlimited)        | int                                                                | Per-book device limit (`403 exceed_max_devices`)                            | `500`                       |
 | `SHIM_ENABLED`                             | no (`0`)                    | `0`/`1`                                                        | Starts the KX shim supervisor                                                 | `1`                         |
 | `SHIM_LISTEN`                              | no (`127.0.0.1:21116`)      | `host:port`                                                      | **Bind** address of the shim — must be local to this machine           | `0.0.0.0:21116` for LAN     |
-| `SHIM_UPSTREAM`                            | no (`127.0.0.1:21166`)      | `host:port`                                                      | Real `hbbs` rendezvous — never the relay port `21117`                    | `192.168.1.100:21116`       |
+| `SHIM_UPSTREAM`                            | no (`127.0.0.1:21166`)      | `host:port`                                                      | Real `hbbs` rendezvous — never the relay port `21117`                    | `<hbbs-host>:21116`         |
 | `SHIM_ID_KEY`                              | yes if shim on                | abs path to hbbs **private** `id_ed25519` (64-byte secret) | Signs the server KeyExchange                                                  | `/opt/keys/hbbs-id_ed25519` |
 | `SHIM_MAX_CONNS` / `SHIM_PER_IP_PER_MIN` | no (`200`/`30`)           | int                                                                | Shim DoS caps                                                                 | —                            |
 | `MAX_BODY_BYTES`                           | no (`5242880`)              | int                                                                | HTTP body cap → `413`                                                      | —                            |
@@ -236,9 +241,11 @@ or passwords — use obvious placeholders.
 - **`.venv/bin/python: No module named app`** — run from the repo root
   (or `PYTHONPATH=<root>`); `scripts/start.sh` handles this.
 - **Port already in use (`:8000`/`:21116`)** — `ss -tlnp | grep -E '8000|21116'`,
-  stop the stale process (`./scripts/stop.sh` kills by PID file).
+  stop the stale process (`./scripts/stop.sh` validates the PID file and falls
+  back to matching `python -m app` by cwd/cmdline).
 - **`/health/ready` → shim `down`** — the shim crashed repeatedly (bad key,
-  port busy, upstream unreachable). Read the app log; fix and restart.
+  port busy, upstream unreachable). Read stdout/stderr (`journalctl` or
+  `docker compose logs`); fix and restart.
 - **Shim crash-loop `address already in use`** — another `hbbs`/process owns
   `SHIM_LISTEN`. Either free it or move `hbbs` (`hbbs -p <other>`) and point
   `SHIM_UPSTREAM` there.

@@ -38,7 +38,10 @@ Components and responsibilities:
   clients pass through untouched.
 - **Storage** — one SQLite database at `data/base.db`, Alembic migrations.
 
-Capabilities and limits of this version: no Docker setup, no built-in TLS
+Capabilities and limits of this version: Docker files exist in the working
+tree (`Dockerfile`, `docker-compose.yml`, `.dockerignore`) but are currently
+listed in `.gitignore`, so a clean clone cannot build the image until they are
+added to git; no built-in TLS
 termination (use Caddy/Nginx in front for anything beyond loopback), legacy panel has no
 per-form CSRF tokens (SameSite=Lax only), heartbeat presence is spoofable
 within rate limits (devices have no credentials by client design).
@@ -46,7 +49,9 @@ within rate limits (devices have no credentials by client design).
 ## 2. Getting started
 
 Debian/Ubuntu, Python 3.13, no root needed (all default ports > 1024).
-No Docker. For an optional React rebuild: Node.js 22 LTS.
+Docker is optional (files exist in the working tree; see `README.md`), but
+they are not currently tracked by git.
+For an optional React rebuild: Node.js 22 LTS.
 
 From the repository root — separate commands so a failure is easy to locate:
 
@@ -100,7 +105,8 @@ curl http://127.0.0.1:8000/health/ready
 → `{"status":"ready","db":"up","shim":{"state":"disabled"}}`
 (`disabled` is normal without the shim; `running/alive:true` when enabled;
 `down` after repeated crashes — see §9). Panel: `http://127.0.0.1:8000/app/`.
-Interactive API docs: `http://127.0.0.1:8000/docs`.
+Interactive API docs are **disabled by default**; they are served only when
+`DEV_MODE=1` or `EXPOSE_DOCS=1` (`http://127.0.0.1:8000/docs`).
 
 First admin (second terminal, server keeps running) and first request:
 
@@ -122,7 +128,8 @@ curl -X POST http://127.0.0.1:8000/api/ab/personal \
 → `200 {"guid":"…"}`.
 
 Stop: `Ctrl+C` (SIGTERM works the same — API drains, shim thread stops with a
-10 s join, no orphans) or `./scripts/stop.sh` (PID file `data/app.pid`).
+10 s join, no orphans) or `./scripts/stop.sh` (validates the PID file against
+a live `python -m app`, then falls back to matching the process by cwd/cmdline).
 Restart is the same start command; migrations are idempotent.
 
 ## 3. Architecture
@@ -145,12 +152,14 @@ expiry `SESSION_DAYS`; logout deletes it) → `POST /api/ab/*` with
 `Authorization: Bearer` (book access re-checked per request via
 `get_book_for_user` + `rule_for`) → devices `POST /api/heartbeat {id,…}`
 stamp `last_seen` (derived: `online` ≤ 45 s, else `offline`, never-seen
-`unknown`) → panel SPA uses `/api/v1/*` with the same token from memory.
+`unknown`) → panel SPA uses `/api/v1/*` with the same token stored in
+`localStorage` (`ab_token`).
 
 Trust boundaries: the network is untrusted (every `/api/*` except
 login/login-options/heartbeat/health needs a valid token; the shim protocol
-itself has no authentication — contained by caps). Bearer tokens live only in
-client memory and the `sessions` table. `data/` is `0700`, DB/backups `0600`;
+itself has no authentication — contained by caps). Bearer tokens live in the
+browser's `localStorage` (`ab_token`) and the `sessions` table. `data/` is
+`0700`, DB/backups `0600`;
 the hbbs private key is read-only input, never committed/logged/returned.
 `X-Forwarded-*` headers are ignored by default; only when the direct peer is a
 configured trusted proxy (`TRUSTED_PROXIES`) is `X-Forwarded-For` used, and
@@ -245,7 +254,7 @@ is rejected with `422` — such IDs would redirect client transport.
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/stats` | `{devices,online,offline,unknown}` over visible books |
+| GET | `/stats` | `{devices,online,offline,unknown,discovered,discovered_online}`; book counts over visible books, discovered is server-wide |
 | GET/POST | `/address-books` | list with counts and your `rule`; create `{name}` (admin, shared) |
 | PUT/DELETE | `/address-books/{bid}` | rename / delete shared book, fullControl (rule 3) only; personal books can neither be renamed nor deleted |
 | GET | `/address-books/{bid}/entries` | `search,tag[] (repeat),mode=and\|or,untagged,presence=all\|online\|offline\|unknown,sort=alias\|rustdesk_id\|last_seen\|status,order,page,page_size(≤200)` → `{total,data}` with `tag_objs[{name,color}]`, `presence`, `last_seen`, `password_configured`, timestamps |
@@ -333,10 +342,12 @@ the login + `/api/ab/personal` calls from §2, and the live-server scripts in
 
 ## 9. Troubleshooting
 
-Order: `logs/app.log` → `/health/ready` → ports → config.
+Order: stdout/stderr (`journalctl` or `docker compose logs`) → `/health/ready`
+→ ports → config. The app does not create `logs/app.log`.
 `FATAL: …SECRET… is not set` → fill `.env` (or `DEV_MODE=1` for experiments).
 `No module named app` → run from repo root / use `start.sh`. Port busy →
-`ss -tlnp`, stop the stale holder (`stop.sh` only kills PID-file processes).
+`ss -tlnp`, stop the stale holder (`stop.sh` validates PID + cwd/cmdline and
+falls back to matching `python -m app`).
 Shim bind crash-loop → free `SHIM_LISTEN` or move `hbbs`. **`SHIM_LISTEN` on
 a foreign IP can never bind** (`Cannot assign requested address` — observed
 live); **`SHIM_ID_KEY` must be the 64-byte private `id_ed25519`, not the
