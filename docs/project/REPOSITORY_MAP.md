@@ -18,6 +18,7 @@
 | `Dockerfile`, `docker-compose.yml` | сборка/запуск контейнера (**сейчас в `.gitignore`, не в git**) |
 | `requirements.txt` | Python-зависимости (без lock-файла) |
 | `README.md`, `docs/ru.md`, `docs/en.md` | публичная документация и быстрый старт |
+| `TODO.md` | состояние разработки, следующие задачи, долг, блокеры |
 | `docs/project/`, `docs/development/`, `docs/knowledge/` | внутренняя документация для разработки/агентов |
 | `.opencode/skills/` | Skills: `project-debugging`, `sqlite-changes` |
 | `SECURITY_AUDIT.md` | исторический аудит SEC-001…SEC-020 (не в git) |
