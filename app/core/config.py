@@ -48,9 +48,19 @@ class Settings(BaseSettings):
     # Request hardening.
     max_body_bytes: int = 5 * 1024 * 1024
     login_per_minute_per_ip: int = 20
-    heartbeat_per_minute_per_ip: int = 300
+    # Heartbeat: the stock client sends one every ~15s (4/min). Each device gets
+    # its own bucket keyed by (id, client IP); the per-IP value is an aggregate
+    # flood cap that must cover every device behind one NAT: 800 devices at
+    # 15s ≈ 3200/min. Keep the aggregate well above that while remaining finite.
+    heartbeat_per_minute_per_device: int = 20
+    heartbeat_per_minute_per_ip: int = 6000
     # /api/sysinfo is unauthenticated by design (stock clients send no auth).
-    sysinfo_per_minute_per_ip: int = 60
+    # The client uploads at startup and after a Windows user logs in, so a
+    # first boot of 800 devices behind one NAT is one burst of ≤800 requests.
+    # Duplicates are acknowledged without a DB write (see
+    # services/device_info.save_sysinfo), so this cap only has to absorb that
+    # bootstrap burst while remaining a finite flood guard.
+    sysinfo_per_minute_per_ip: int = 6000
     # Shim discovery registry (shim -> SQLite). On by default. The shim still
     # applies its own per-IP limits before publishing anything.
     discovery_enabled: str = "1"

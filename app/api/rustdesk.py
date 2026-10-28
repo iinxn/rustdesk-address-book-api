@@ -6,11 +6,12 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import bearer_token, current_user
 from app.core.config import settings
 from app.core.middleware import client_ip
-from app.db.session import get_db
+from app.db.session import SessionLocal, get_db
 from app.models.models import AddressBook, AddressBookEntry, EntryTag, Tag, User
 from app.schemas.rustdesk import LoginIn
 from app.core.validators import validate_rustdesk_id
@@ -342,12 +343,24 @@ async def ab_tag_delete(guid: str, request: Request, user: User = Depends(curren
 
 # --- device heartbeat + sysinfo (presence/inventory sources, see services) ---
 
+def _record_heartbeat(rid: str, version: str, ip: str) -> bool:
+    """Own session in a worker thread: never block the event loop on SQLite."""
+    with SessionLocal() as db:
+        presence_svc.record_heartbeat(db, rid)
+        info_svc.record_heartbeat(db, rid, version, ip)
+        return info_svc.take_refresh(rid)
+
+
 @router.post("/api/heartbeat")
-async def heartbeat(request: Request, db: Session = Depends(get_db)):
+async def heartbeat(request: Request):
     """Unauthenticated by design: controlled devices post {"id","uuid","ver",...}
     every 15s when a custom api-server is configured. We stamp last_seen on
     matching entries, refresh liveness of an existing info row, and optionally
-    ask for a sysinfo re-upload ({"sysinfo": true})."""
+    ask for a sysinfo re-upload ({"sysinfo": true}).
+
+    DB work runs in Starlette's threadpool: a burst of 800 devices must not
+    serialise on the event loop or exhaust the SQLite connection pool.
+    """
     try:
         data = await request.json()
     except Exception:
@@ -356,9 +369,10 @@ async def heartbeat(request: Request, db: Session = Depends(get_db)):
         return {}
     rid = str(data.get("id", "")).strip()
     if rid and validate_rustdesk_id(rid) is None:
-        presence_svc.record_heartbeat(db, rid)
-        info_svc.record_heartbeat(db, rid, str(data.get("ver", "")), client_ip(request))
-        if info_svc.take_refresh(rid):
+        refresh = await run_in_threadpool(
+            _record_heartbeat, rid, str(data.get("ver", "")), client_ip(request)
+        )
+        if refresh:
             return {"sysinfo": True}
     return {}
 
@@ -370,13 +384,25 @@ async def sysinfo_ver():
                              headers={"Cache-Control": "no-store"})
 
 
+def _persist_sysinfo(rid: str, data: dict, ip: str) -> None:
+    """Own session in a worker thread: a first-boot burst must not block users."""
+    approved = info_svc.take_approval(rid)
+    with SessionLocal() as db:
+        info_svc.save_sysinfo(db, rid, data, ip, force=approved)
+
+
 @router.post("/api/sysinfo")
-async def sysinfo(request: Request, db: Session = Depends(get_db)):
+async def sysinfo(request: Request):
     """Stock-client inventory upload (no auth by design).
 
     Only a small whitelist is stored; `uuid` and all preset/option keys (some
     carry address-book passwords) are discarded. The exact response string is
     part of the client contract.
+
+    The client also re-sends this on its own (startup, Windows user login) and
+    retries every ~2 minutes unless it sees `SYSINFO_UPDATED`. So duplicates
+    are acknowledged but not written: a card is only refreshed via the panel
+    button, which arms a one-shot approval on the next heartbeat.
     """
     raw = await request.body()
     if len(raw) > 32 * 1024:
@@ -393,7 +419,7 @@ async def sysinfo(request: Request, db: Session = Depends(get_db)):
         # retries after its normal timeout. Never echo the supplied value.
         return PlainTextResponse("ID_NOT_FOUND",
                                  headers={"Cache-Control": "no-store"})
-    info_svc.save_sysinfo(db, rid, data, client_ip(request))
+    await run_in_threadpool(_persist_sysinfo, rid, data, client_ip(request))
     return PlainTextResponse("SYSINFO_UPDATED",
                              headers={"Cache-Control": "no-store"})
 

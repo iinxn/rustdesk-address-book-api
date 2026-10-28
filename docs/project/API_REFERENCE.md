@@ -27,7 +27,7 @@
 | ручные ошибки `/api/*` | `{"error":"..."}` | 400/401/403/404/409/422 |
 | ручные ошибки `/api/v1/*` | `{"detail":"..."}` | 400/403/404/409/422/500 |
 | Pydantic-валидация | `{"detail":[{...}]}` | 422 |
-| rate limit | `{"error":"rate limited"}` | 429 |
+| rate limit | `{"error":"rate limited"}` + `Retry-After` | 429 |
 | body cap | `{"detail":"body too large"}` | 413 |
 | `/api/sysinfo` | `text/plain` `ID_NOT_FOUND` / `SYSINFO_UPDATED` | 200/400/413 |
 
@@ -46,15 +46,19 @@
 | `MAX_BODY_BYTES` | 5 MiB (по `Content-Length`) | `BodyCapMiddleware` |
 | `/api/sysinfo` | 32 KiB (фактическое чтение тела) | `rustdesk.sysinfo` |
 | `/api/login` | 20 запросов/мин на IP | `LOGIN_PER_MINUTE_PER_IP` |
-| `/api/heartbeat` | 300/мин на IP | `HEARTBEAT_PER_MINUTE_PER_IP` |
-| `/api/sysinfo` | 60/мин на IP | `SYSINFO_PER_MINUTE_PER_IP` |
+| `/api/heartbeat` | 20/мин на устройство (ключ `id` + IP) | `HEARTBEAT_PER_MINUTE_PER_DEVICE` |
+| `/api/heartbeat` | 6000/мин суммарно на IP (защита от флуда) | `HEARTBEAT_PER_MINUTE_PER_IP` |
+| `/api/sysinfo` | 6000/мин на IP (агрегатный потолок) | `SYSINFO_PER_MINUTE_PER_IP` |
 | bulk ids | 500 уникальных | `MAX_BULK_IDS` |
 | bulk tags | 20 имён, длина ≤64 | `MAX_BULK_TAGS` |
 | `page_size` в `/api/v1` | 1…200 | `list_entries`, `list_discovered` |
 | `pageSize` в `/api/ab/*` | **не ограничен** | SEC-006, известное ограничение |
 
 `X-Forwarded-For` учитывается только если прямой peer входит в
-`TRUSTED_PROXIES`; иначе используется прямой IP.
+`TRUSTED_PROXIES`; иначе используется прямой IP. Клиенты за одним NAT
+получают общий IP, поэтому heartbeat лимитируется отдельно по устройству,
+а per-IP значение — только агрегатный потолок. При `429` сервер отдаёт
+`Retry-After` (секунды до освобождения окна).
 
 ### 1.4. Время
 
@@ -245,8 +249,18 @@ Bearer + write. Тело — JSON-массив ID:
 - Если выставлен флаг refresh → ответ `{"sysinfo": true}` (один раз).
 - Иначе, а также при невалидном теле/ID → `{}`.
 
+Флаг refresh (кнопка «Refresh info» в панели) — единственный способ
+разрешить перезапись уже заполненной карточки. Heartbeat, отдавший
+`{"sysinfo": true}`, выдаёт одноразовое разрешение на 120 секунд; клиент
+обычно присылает `/api/sysinfo` в течение ~3 секунд.
+
 Heartbeat **не** создаёт `device_info` и **не** создаёт discovered. Подделка
-ID возможна by design (SEC-005, accepted risk); лимит 300/мин на IP.
+ID возможна by design (SEC-005, accepted risk). Защита от флуда двухслойная:
+20/мин на пару `(id, client IP)` и 6000/мин суммарно на IP; запрос без
+валидного `id` (в т.ч. chunked без `Content-Length`) ограничивается только
+агрегатным IP-потолком. При `429` — `{"error":"rate limited"}` и
+`Retry-After`. DB-работа выполняется в threadpool, чтобы всплеск heartbeat
+не блокировал event loop.
 
 ### 2.14. `POST /api/sysinfo_ver`
 
@@ -276,12 +290,38 @@ ID возможна by design (SEC-005, accepted risk); лимит 300/мин н
 | тело > 32 KiB | `413` `ID_NOT_FOUND` |
 | не JSON / не объект | `400` `ID_NOT_FOUND` |
 | невалидный/пустой `id` | `200` `ID_NOT_FOUND` |
-| успех | `200` `SYSINFO_UPDATED` |
+| `id` валиден и лимит не превышен | `200` `SYSINFO_UPDATED` |
+| превышен `SYSINFO_PER_MINUTE_PER_IP` | `429` `{"error":"rate limited"}` + `Retry-After` |
 
-Сохраняются только `hostname`, `username`, `os`, `cpu`, `memory`, `version`,
-`ip`. `uuid` и все preset/option-ключи (могут содержать пароли книг)
-отбрасываются. Парсинг CPU/RAM/OS консервативный: не распознал — поле пустое.
-Ответ всегда `text/plain`, `Cache-Control: no-store`.
+`SYSINFO_UPDATED` возвращается и тогда, когда запись намеренно пропущена:
+клиент считает любую другую строку временной ошибкой и повторяет отправку
+каждые ~2 минуты (а на `ID_NOT_FOUND` — каждые 3 секунды). Поэтому
+«принято, но не записано» — это штатный ответ, а не ошибка.
+
+Когда строка **не** пишется:
+
+- карточка уже заполнена (`hostname`, `os`, `username`), и нет разрешения
+  от кнопки панели. Автоматическая перезапись существующей карточки
+  отключена: клиент сам шлёт sysinfo при старте и после входа пользователя
+  Windows, и иначе весь парк переписывал бы БД при каждом рестарте;
+- строка неполная, но в payload нет недостающих полей (например, пустой
+  `username`): разрешается только «достроить» карточку, а не переписывать её;
+- `id` валиден, но устройство неизвестно панели: его нет ни в
+  `address_book_entries`, ни в `discovered_devices`. Строка не создаётся,
+  чтобы поток случайных ID не раздувал БД. Добавь устройство в книгу и
+  нажми «Refresh info»;
+- запрос отклонён лимитом (`429`).
+
+Разрешение от кнопки (`force`) обходит эти проверки один раз, поэтому
+работает и для неполной карточки, и для устройства, которого ещё нет в книге
+(если у пользователя есть доступ к его карточке).
+
+Ответ всегда `text/plain`, `Cache-Control: no-store`. Whitelist полей:
+`hostname`, `username`, `os`, `cpu`, `memory`, `version`, `ip`; `uuid` и все
+preset/option-ключи (могут содержать пароли книг) отбрасываются. Парсинг
+CPU/RAM/OS консервативный: не распознал — поле пустое. Запись выполняется в
+threadpool со своей сессией, чтобы первый старт парка не блокировал event
+loop.
 
 ### 2.16. Legacy-заглушки
 
@@ -541,7 +581,11 @@ ID. Ответ — `entry_out`.
 Просит клиента прислать sysinfo на следующем heartbeat. Та же проверка
 доступа, что в §3.10. Ответ `{"ok":true,"expires_in":1800}`. Флаг живёт в
 памяти процесса 30 минут, одноразовый, работает только если клиент вообще
-шлёт heartbeat (нужен custom `api-server`).
+шлёт heartbeat (нужен custom `api-server`). Когда heartbeat забирает флаг,
+он выдаёт одноразовое разрешение на запись ещё на 120 секунд — этого хватает
+клиенту (~3 с), но не хватает «запоздавшему» запросу перезаписать карточку
+позже. Это единственный путь перезаписать уже заполненную карточку
+(см. §2.15).
 
 ### 3.12. `DELETE /api/v1/discovered/{rid}`
 
@@ -618,7 +662,8 @@ Cookie-сессия `session` (Starlette `SessionMiddleware`, подпись `WE
 
 ## 7. Проверка контракта
 
-Так как автотестов нет, после изменения API выполни ручной smoke из
-`docs/development/TESTING.md`: login → `/api/ab/personal` → `/api/ab/peers` →
-`/api/v1/address-books` → нужный сценарий. Для RustDesk-контракта обязательна
-проверка живым клиентом: формы ответов нельзя считать «очевидными».
+Автотесты покрывают только heartbeat rate limiting и sysinfo write-once.
+После изменения API выполни ручной smoke из `docs/development/TESTING.md`:
+login → `/api/ab/personal` → `/api/ab/peers` → `/api/v1/address-books` →
+нужный сценарий. Для RustDesk-контракта обязательна проверка живым клиентом:
+формы ответов нельзя считать «очевидными».

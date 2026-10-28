@@ -194,8 +194,9 @@ per-IP лимитов. hbbs доверен в части punch/relay-медиа�
 | `SHIM_MAX_CONNS` / `SHIM_PER_IP_PER_MIN` | `200` / `30` | int | DoS-лимиты rendezvous-порта |
 | `MAX_BODY_BYTES` | `5242880` | int | Тела больше → `413` |
 | `LOGIN_PER_MINUTE_PER_IP` | `20` | int | Больше логинов → `429` |
-| `HEARTBEAT_PER_MINUTE_PER_IP` | `300` | int | Больше heartbeat → `429` |
-| `SYSINFO_PER_MINUTE_PER_IP` | `60` | int | Больше загрузок `/api/sysinfo` → `429` |
+| `HEARTBEAT_PER_MINUTE_PER_DEVICE` | `20` | int | Больше heartbeat от одного устройства (ключ: `id` + IP) → `429` |
+| `HEARTBEAT_PER_MINUTE_PER_IP` | `6000` | int | Агрегатный потолок heartbeat на IP → `429` |
+| `SYSINFO_PER_MINUTE_PER_IP` | `6000` | int | Агрегатный лимит sysinfo на IP; дубликаты подтверждаются без записи в БД |
 | `DISCOVERY_ENABLED` | `1` | `0`/`1` | Переносить события discovery из шима в SQLite |
 | `DISCOVERY_ONLINE_SEC` | `180` | int | Помечать молчащее обнаруженное устройство offline |
 | `TRUSTED_PROXIES` | пусто | список IP через запятую | Доверять `X-Forwarded-For` от этих пиров для ключа лимитов; пусто = не доверять вовсе |

@@ -96,20 +96,32 @@ flowchart LR
 ```text
 Uvicorn
   → SessionMiddleware (cookie, WEB_SECRET, SameSite=Lax, https_only=False)
-  → RateLimitMiddleware (per-IP, только /api/login, /api/heartbeat, /api/sysinfo)
+  → RateLimitMiddleware (per-IP для login/sysinfo; per-device + aggregate per-IP для heartbeat)
   → BodyCapMiddleware (Content-Length > MAX_BODY_BYTES → 413)
   → router (rustdesk → webapi → panel)
-  → dependency get_db() (SQLAlchemy Session на запрос)
+  → dependency get_db() (SQLAlchemy Session на запрос; heartbeat и sysinfo — своя сессия в threadpool)
 ```
 
 Особенности:
 
-- `RateLimitMiddleware` хранит `deque` в модульном `HITS`; окно 60 секунд,
-  очистка — только для текущего ключа при обращении. Глобального sweeper нет.
+- `RateLimitMiddleware` хранит `deque` в модульном `HITS`; окно 60 секунд.
+  `login`/`sysinfo` ключуются по IP; heartbeat — сначала по `(id, client IP)`,
+  затем по агрегатному IP-потолку. Устаревшие ключи вычищаются не чаще раза
+  в 60 с, чтобы per-device bucket'ы не росли безгранично.
+- Heartbeat читает маленькое тело (≤8 KiB и только при наличии
+  `Content-Length`), чтобы получить `id` для ключа; иначе остаётся только
+  IP-потолок. Прочитанное тело кешируется Starlette и не читается повторно.
+- `/api/heartbeat` выполняет SQLite-запись в threadpool (`run_in_threadpool`)
+  со своей сессией: синхронный драйвер не должен блокировать event loop при
+  всплеске подключений.
 - `BodyCapMiddleware` проверяет только `Content-Length`; chunked-запрос без
-  длины не ограничивается этим middleware (см. SEC-013).
+  длины не ограничивается этим middleware (см. SEC-013), но heartbeat всё
+  равно упирается в агрегатный IP-лимит.
 - `client_ip()` использует прямой peer; `X-Forwarded-For` читается только
   если прямой peer входит в `TRUSTED_PROXIES`, и только для ключа лимита.
+- `HITS` — in-memory и per-process. `python -m app` запускает один uvicorn
+  worker; при нескольких процессах лимиты умножатся. Внешний store для
+  счётчиков пока не реализован.
 - `SessionMiddleware` нужен только legacy-панели; Bearer-токены SPA/клиента
   к cookie не привязаны.
 
@@ -183,7 +195,9 @@ sequenceDiagram
 - `status_of()`: нет `last_seen` → `unknown`; `now - last_seen <= 45s` →
   `online`; иначе `offline`.
 - Heartbeat не создаёт строку `device_info` и не создаёт discovered.
-- Ответ всегда `{}`, кроме запроса повторной отправки sysinfo.
+- Ответ всегда `{}`, кроме запроса повторной отправки sysinfo. В этом случае
+  heartbeat выдаёт одноразовое разрешение на запись (120 с), которое
+  потребляет следующий `/api/sysinfo`.
 - Эндпоинт неаутентифицирован by design; ID валидируется, но может быть
   чужим (SEC-005, accepted risk).
 
@@ -197,22 +211,38 @@ sequenceDiagram
     participant DB as device_info
     D->>S: JSON {id,hostname,username,os,cpu,memory,version,...}
     S->>S: body ≤ 32KB, JSON object, validate id
-    S->>V: save_sysinfo(id, payload, client_ip)
+    S->>V: threadpool: take_approval(id), save_sysinfo(...)
     V->>V: whitelist + parse os/cpu/memory
-    V->>DB: upsert row, collected_at=utcnow
+    V->>DB: SELECT row
+    alt карточка заполнена и нет разрешения панели
+        V-->>S: skip (no write)
+    else первая запись / неполная карточка / refresh
+        V->>DB: upsert, collected_at=utcnow
+    end
     S-->>D: text/plain "SYSINFO_UPDATED"
 ```
 
+- Запись **write-once**: если `hostname`, `os` и `username` уже заполнены,
+  автоматический upload игнорируется. Перезапись возможна только после
+  кнопки «Refresh info» (одноразовое разрешение на 120 с, см. §7.1).
+- Неполную карточку можно «достроить» (например, Windows присылает пустой
+  `username` до входа, потом заполняет), но только если в payload есть
+  недостающие поля.
+- Устройство должно быть известно панели: строка создаётся, только если ID
+  есть в `address_book_entries` или `discovered_devices`. Иначе — тихий
+  no-op: клиент получает `SYSINFO_UPDATED` и не зацикливает retry, а БД не
+  растёт от случайных ID.
 - Невалидный/отсутствующий ID → `text/plain "ID_NOT_FOUND"` (200 или 413/400
-  в зависимости от причины).
+  в зависимости от причины). На этот ответ клиент повторяет попытку каждые
+  ~3 секунды, поэтому он отдаётся только заведомо невалидным ID.
 - Сохраняются только `hostname`, `username`, `os`, `cpu`, `memory`, `version`,
   `ip`; `uuid` и все прочие ключи игнорируются.
 - Парсинг консервативный: если формат не распознан, поля остаются пустыми;
   UI показывает `Not reported`, а не выдумывает значения.
 - `/api/device-info/{rid}/refresh` ставит одноразовый флаг в памяти
   (`REFRESH_TTL_SEC=1800`); следующий heartbeat получает `{"sysinfo": true}`.
-  Флаг живёт только в процессе и только для устройств, которые вообще шлют
-  heartbeat (нужен custom `api-server`).
+  Флаг и разрешение живут только в процессе и только для устройств, которые
+  вообще шлют heartbeat (нужен custom `api-server`).
 
 ### 7.3. Discovery через shim
 

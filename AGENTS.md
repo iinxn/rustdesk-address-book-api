@@ -138,17 +138,22 @@ Self-hosted backend для **немодифицированного** клиен
 
 ## 6. Тесты и проверки
 
-**Фактическое состояние:** в репозитории нет тестов. Каталог `tests/` и
-`pytest.ini` удалены коммитом `3311671`; `pytest`/`httpx` отсутствуют в
-`requirements.txt`. `.pytest_cache/` — остаток, а не доказательство покрытия.
-Не заявляй, что тесты пройдены, если ты их не запускал.
+**Фактическое состояние:** автотесты есть для heartbeat rate limiting и
+sysinfo write-once (`tests/test_heartbeat_rate_limit.py`,
+`tests/test_sysinfo_upload.py`, временная SQLite + Alembic). Полного покрытия
+нет; `pytest`/`httpx` живут в `requirements-dev.txt`, не в runtime. Не
+заявляй, что тесты пройдены, если ты их не запускал, и не выдавай один набор
+за покрытие всего проекта.
 
 Минимальные проверки для любой задачи:
 
 ```bash
 # синтаксис/импорт Python (с текущим .venv)
-.venv/bin/python -m compileall -q app
+.venv/bin/python -m compileall -q app tests
 .venv/bin/python -c 'import app.main'
+
+# автотесты
+.venv/bin/python -m pytest -q
 
 # frontend (если менялся UI/контракт)
 cd frontend && npm run build && npm run lint

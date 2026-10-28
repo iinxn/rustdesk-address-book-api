@@ -1,0 +1,4 @@
+# Development/test-only dependencies. Keep them out of the runtime image.
+# Install: .venv/bin/pip install -r requirements-dev.txt
+pytest>=8
+httpx>=0.27

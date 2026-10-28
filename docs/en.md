@@ -196,8 +196,9 @@ commit real values.
 | `SHIM_MAX_CONNS` / `SHIM_PER_IP_PER_MIN` | `200` / `30` | int | DoS caps on the rendezvous port |
 | `MAX_BODY_BYTES` | `5242880` | int | Larger bodies → `413` |
 | `LOGIN_PER_MINUTE_PER_IP` | `20` | int | More logins → `429` |
-| `HEARTBEAT_PER_MINUTE_PER_IP` | `300` | int | More heartbeats → `429` |
-| `SYSINFO_PER_MINUTE_PER_IP` | `60` | int | More `/api/sysinfo` uploads → `429` |
+| `HEARTBEAT_PER_MINUTE_PER_DEVICE` | `20` | int | More heartbeats from one device (key: `id` + client IP) → `429` |
+| `HEARTBEAT_PER_MINUTE_PER_IP` | `6000` | int | Aggregate per-IP heartbeat cap → `429` |
+| `SYSINFO_PER_MINUTE_PER_IP` | `6000` | int | Aggregate per-IP sysinfo cap; duplicates are acked without a DB write |
 | `DISCOVERY_ENABLED` | `1` | `0`/`1` | Drain shim discovery events into SQLite |
 | `DISCOVERY_ONLINE_SEC` | `180` | int | Mark silent discovered devices offline after this many seconds |
 | `TRUSTED_PROXIES` | empty | comma-separated IPs | Trust `X-Forwarded-For` from these peers for rate-limit keying; empty = never trust it |

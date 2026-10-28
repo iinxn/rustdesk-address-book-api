@@ -17,6 +17,9 @@
 | `logs/` | создаётся при старте; приложение само файл лога не пишет |
 | `Dockerfile`, `docker-compose.yml` | сборка/запуск контейнера (**сейчас в `.gitignore`, не в git**) |
 | `requirements.txt` | Python-зависимости (без lock-файла) |
+| `requirements-dev.txt` | тестовые зависимости (`pytest`, `httpx`), не в runtime |
+| `tests/` | автотесты; временная SQLite, не `data/` |
+| `pytest.ini` | конфигурация pytest и маркер `slow` |
 | `README.md`, `docs/ru.md`, `docs/en.md` | публичная документация и быстрый старт |
 | `TODO.md` | состояние разработки, следующие задачи, долг, блокеры |
 | `docs/project/`, `docs/development/`, `docs/knowledge/` | внутренняя документация для разработки/агентов |
@@ -64,7 +67,7 @@
 | `ab.py` | книги, права, peers, теги | `personal_book`, `get_book_for_user`, `rule_for`, `can_write`, `shared_profiles`, `peer_out`, `sync_entry_tags`, `add_entry_tags`, `remove_entry_tags`, `apply_peer_update`, `tag_usage` |
 | `auth.py` | пользователи и opaque-сессии | `create_user` (создаёт личную книгу), `authenticate`, `create_session`, `destroy_user_sessions`, `purge_expired_sessions`, `user_by_token`, `destroy_session` |
 | `presence.py` | presence по heartbeat | `record_heartbeat`, `status_of`; `HEARTBEAT_SEC=15`, `ONLINE_AFTER_SEC=45` |
-| `device_info.py` | sysinfo и refresh | `save_sysinfo`, `parse_cpu`, `parse_memory`, `parse_os`, `record_heartbeat`, `request_refresh`, `take_refresh`, `info_out` |
+| `device_info.py` | sysinfo (write-once), refresh/approval | `save_sysinfo`, `device_known`, `missing_fields`, `parse_cpu`, `parse_memory`, `parse_os`, `record_heartbeat`, `request_refresh`, `take_refresh`, `take_approval`, `info_out` |
 | `discovery.py` | drain очереди → БД | `reset_online`, `drain_once` (upsert, merge source, stale sweep) |
 | `discovery_events.py` | потокобезопасная очередь | `publish`, `drain`, `qsize`, `dropped_count`; `MAX_EVENTS=20000` |
 
@@ -76,7 +79,7 @@
 | `security.py` | bcrypt, `new_token` |
 | `crypto.py` | Fernet для паролей устройств; ephemeral key при пустом `DEVICE_SECRET` (dev) |
 | `validators.py` | `validate_rustdesk_id`: запрет `@ / \ ? & =`, пробелов; regex `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` |
-| `middleware.py` | `client_ip`, `BodyCapMiddleware`, `RateLimitMiddleware`, `rate_limit_rules` |
+| `middleware.py` | `client_ip`, `BodyCapMiddleware`, `RateLimitMiddleware`, `heartbeat_allow`, `reset_rate_limits` |
 | `logging.py` | `basicConfig`; файлового handler нет |
 
 ### `app/models/`, `app/schemas/`, `app/db/`
@@ -182,5 +185,11 @@
   `app/services/discovery*.py`.
 - `app/core/config.py` + `.env.example` + `docker-compose.yml` +
   `docs/development/WORKFLOW.md`.
+- `app/core/middleware.py` + `app/core/config.py` + `docs/project/ARCHITECTURE.md`
+  + `docs/SECURITY.md` при изменении rate limiting.
+- `tests/test_heartbeat_rate_limit.py` + `app/core/middleware.py` +
+  `app/api/rustdesk.py` при изменении heartbeat.
+- `tests/test_sysinfo_upload.py` + `app/services/device_info.py` +
+  `app/api/rustdesk.py` при изменении sysinfo/refresh.
 - `README.md` + `docs/ru.md` + `docs/en.md` при изменении публичного
   поведения/команд.
