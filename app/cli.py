@@ -13,16 +13,18 @@ def cmd_create_admin(args):
     from sqlalchemy import select
     from app.db.session import SessionLocal
     from app.models.models import User
-    from app.services.auth import create_user
+    from app.services.auth import DISPLAY_NAME_MAX, clean_display_name, create_user
     username = args.username or input("username: ").strip()
     password = getpass.getpass("password: ")
     if not username or not password:
         raise SystemExit("username/password required")
+    if len(clean_display_name(args.display_name)) > DISPLAY_NAME_MAX:
+        raise SystemExit(f"display-name too long (max {DISPLAY_NAME_MAX})")
     db = SessionLocal()
     try:
         if db.scalar(select(User).where(User.username == username)):
             raise SystemExit("user already exists")
-        create_user(db, username, password, is_admin=True)
+        create_user(db, username, password, is_admin=True, display_name=args.display_name)
         print(f"admin '{username}' created")
     finally:
         db.close()
@@ -82,6 +84,7 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd")
     c = sub.add_parser("create-admin")
     c.add_argument("--username", default="")
+    c.add_argument("--display-name", default="")
     sub.add_parser("gen-key")
     d = sub.add_parser("dump-book")
     d.add_argument("book_id")

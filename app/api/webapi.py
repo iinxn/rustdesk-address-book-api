@@ -29,12 +29,14 @@ from app.schemas.panel import (
     BulkTagsIn,
     DiscoveredAddIn,
     EntryIn,
+    MeIn,
     TagIn,
     UserIn,
 )
 from app.services import ab as ab_svc
 from app.services import device_info as info_svc
 from app.services import presence as presence_svc
+from app.services.auth import DISPLAY_NAME_MAX, clean_display_name
 from app.db.session import get_db
 
 router = APIRouter(prefix="/api/v1")
@@ -45,6 +47,22 @@ MAX_BULK_TAGS = 20
 
 def err(msg: str, code: int = 400) -> JSONResponse:
     return JSONResponse(status_code=code, content={"detail": msg})
+
+
+def user_out(u: User) -> dict:
+    return {
+        "id": u.id,
+        "username": u.username,
+        "display_name": u.display_name or "",
+        "is_admin": u.is_admin,
+        "is_disabled": u.is_disabled,
+    }
+
+
+def display_name_error(raw: str) -> str | None:
+    if len(clean_display_name(raw)) > DISPLAY_NAME_MAX:
+        return f"display_name too long (max {DISPLAY_NAME_MAX})"
+    return None
 
 
 def books_visible(db: Session, user: User) -> list[AddressBook]:
@@ -746,7 +764,7 @@ def forget_discovered(rid: str, user: User = Depends(current_user),
 def list_users(user: User = Depends(current_user), db: Session = Depends(get_db)):
     if not user.is_admin:
         return err("admin required", 403)
-    return [{"id": u.id, "username": u.username, "is_admin": u.is_admin, "is_disabled": u.is_disabled} for u in db.scalars(select(User).order_by(User.username))]
+    return [user_out(u) for u in db.scalars(select(User).order_by(User.username))]
 
 
 @router.post("/users")
@@ -755,14 +773,17 @@ def create_panel_user(body: UserIn, user: User = Depends(current_user), db: Sess
         return err("admin required", 403)
     if db.scalar(select(User).where(User.username == body.username)):
         return err("duplicate", 409)
+    problem = display_name_error(body.display_name)
+    if problem:
+        return err(problem, 400)
     from app.services.auth import create_user
-    u = create_user(db, body.username, body.password, body.is_admin)
-    return {"id": u.id, "username": u.username, "is_admin": u.is_admin, "is_disabled": u.is_disabled}
+    u = create_user(db, body.username, body.password, body.is_admin, body.display_name)
+    return user_out(u)
 
 
 @router.put("/users/{uid}")
 def update_panel_user(uid: str, body: dict, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    """Edit user: {username?, is_admin?, is_disabled?, password?}. Admin only."""
+    """Edit user: {username?, display_name?, is_admin?, is_disabled?, password?}. Admin only."""
     if not user.is_admin:
         return err("admin required", 403)
     u = db.get(User, uid)
@@ -775,6 +796,13 @@ def update_panel_user(uid: str, body: dict, user: User = Depends(current_user), 
         if new_name != u.username and db.scalar(select(User).where(User.username == new_name)):
             return err("duplicate", 409)
         u.username = new_name
+    if "display_name" in body:
+        if not isinstance(body["display_name"], str):
+            return err("display_name must be a string", 400)
+        problem = display_name_error(body["display_name"])
+        if problem:
+            return err(problem, 400)
+        u.display_name = clean_display_name(body["display_name"])
     if "is_admin" in body:
         if u.id == user.id and not body["is_admin"]:
             return err("cannot demote self", 400)
@@ -796,7 +824,7 @@ def update_panel_user(uid: str, body: dict, user: User = Depends(current_user), 
         # already invalidated by the is_disabled check in panel_user (SEC-001).
         from app.services.auth import destroy_user_sessions
         destroy_user_sessions(db, u.id)
-    return {"id": u.id, "username": u.username, "is_admin": u.is_admin, "is_disabled": u.is_disabled}
+    return user_out(u)
 
 
 @router.delete("/users/{uid}")
@@ -811,3 +839,19 @@ def delete_panel_user(uid: str, user: User = Depends(current_user), db: Session 
     db.delete(u)
     db.commit()
     return {"ok": True}
+
+
+@router.get("/me")
+def get_me(user: User = Depends(current_user)):
+    return user_out(user)
+
+
+@router.put("/me")
+def update_me(body: MeIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Self-service: the signed-in user edits their own display name."""
+    problem = display_name_error(body.display_name)
+    if problem:
+        return err(problem, 400)
+    user.display_name = clean_display_name(body.display_name)
+    db.commit()
+    return user_out(user)

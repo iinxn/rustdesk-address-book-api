@@ -1,7 +1,9 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
-import { clearSession, sessionUser } from './api';
-import type { Toast } from './hooks';
+import { api, clearSession, sessionUser, setDisplayName } from './api';
+import { LANGS, translate, useI18n } from './i18n';
+import type { Lang } from './i18n';
+import { useNotify } from './notifications';
 import { colorCss, relTime, textOnColor } from './types';
 import type { Presence } from './types';
 
@@ -16,6 +18,7 @@ const mobileNavClass = ({ isActive }: { isActive: boolean }) =>
 
 /** Official RustDesk mark + product name (technical package names stay unchanged). */
 export function Brand({ compact = false }: { compact?: boolean }) {
+  const { t } = useI18n();
   return (
     <div className="flex min-w-0 items-center gap-2">
       <img
@@ -27,7 +30,15 @@ export function Brand({ compact = false }: { compact?: boolean }) {
         <div className="truncate text-sm font-bold leading-tight">RustDesk API</div>
         {!compact && (
           <div className="truncate text-[11px] text-slate-500 dark:text-slate-400">
-            Address Book Panel
+            {t('brand.subtitle')}{' '}
+            <a
+              href="https://github.com/iinxn"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hover:text-blue-700 hover:underline dark:hover:text-blue-400"
+            >
+              iinxn
+            </a>
           </div>
         )}
       </div>
@@ -35,9 +46,39 @@ export function Brand({ compact = false }: { compact?: boolean }) {
   );
 }
 
+/** RU / EN switch with the active language highlighted. */
+export function LangSwitch() {
+  const { lang, setLang, t } = useI18n();
+  return (
+    <div
+      role="group"
+      aria-label={t('lang.label')}
+      className="flex overflow-hidden rounded-md border border-slate-300 dark:border-slate-700"
+    >
+      {LANGS.map((code) => (
+        <button
+          key={code}
+          type="button"
+          onClick={() => setLang(code)}
+          aria-pressed={lang === code}
+          className={`px-2 py-1 text-xs font-semibold transition-colors ${
+            lang === code
+              ? 'bg-blue-600 text-white'
+              : 'bg-white text-slate-600 hover:bg-slate-100 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800'
+          }`}
+        >
+          {code.toUpperCase()}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export function Layout({ children, onTheme, dark }: { children: React.ReactNode; onTheme: () => void; dark: boolean }) {
   const nav = useNavigate();
   const u = sessionUser();
+  const { t } = useI18n();
+  const [profileOpen, setProfileOpen] = useState(false);
   return (
     <div className="flex min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
       <aside className="hidden w-56 shrink-0 flex-col border-r border-slate-200 bg-white p-4 md:flex dark:border-slate-800 dark:bg-slate-900">
@@ -45,15 +86,15 @@ export function Layout({ children, onTheme, dark }: { children: React.ReactNode;
           <Brand />
         </div>
         <nav className="flex flex-col gap-1">
-          <NavLink to="/" className={navClass}>Devices</NavLink>
-          <NavLink to="/books" className={navClass}>Address Books</NavLink>
-          <NavLink to="/tags" className={navClass}>Tags</NavLink>
-          {u?.isAdmin && <NavLink to="/users" className={navClass}>Users</NavLink>}
+          <NavLink to="/" className={navClass}>{t('nav.devices')}</NavLink>
+          <NavLink to="/books" className={navClass}>{t('nav.books')}</NavLink>
+          <NavLink to="/tags" className={navClass}>{t('nav.tags')}</NavLink>
+          {u?.isAdmin && <NavLink to="/users" className={navClass}>{t('nav.users')}</NavLink>}
         </nav>
         <div className="mt-auto space-y-1 pt-6 text-[11px] text-slate-500 dark:text-slate-400">
-          <div>Self-hosted RustDesk API</div>
+          <div>{t('shell.selfHosted')}</div>
           <div>
-            Developed by{' '}
+            {t('shell.developedBy')}{' '}
             <a
               href="https://github.com/iinxn"
               target="_blank"
@@ -71,31 +112,40 @@ export function Layout({ children, onTheme, dark }: { children: React.ReactNode;
             <Brand compact />
           </div>
           <div className="ml-auto flex items-center gap-2">
+            <LangSwitch />
             <button
               onClick={onTheme}
-              className="rounded-md border border-slate-200 px-2 py-1 text-sm dark:border-slate-700"
-              title={dark ? 'Switch to light theme' : 'Switch to dark theme'}
-              aria-label="Toggle theme"
+              className="rounded-md border border-slate-300 px-2 py-1 text-sm dark:border-slate-700"
+              title={dark ? t('theme.toLight') : t('theme.toDark')}
+              aria-label={t('theme.toggle')}
             >
               {dark ? '☀️' : '🌙'}
             </button>
-            <span className="hidden text-sm text-slate-500 sm:inline dark:text-slate-400">{u?.username}</span>
+            <button
+              onClick={() => setProfileOpen(true)}
+              className="max-w-[6rem] truncate text-sm text-slate-600 hover:text-slate-900 hover:underline sm:max-w-[10rem] dark:text-slate-400 dark:hover:text-slate-200"
+              title={t('profile.displayName')}
+              aria-label={t('profile.displayName')}
+            >
+              {u?.displayName || u?.username}
+            </button>
             <button
               onClick={() => { clearSession(); nav('/login'); }}
-              className="rounded-md border border-slate-200 px-2 py-1 text-sm dark:border-slate-700"
+              className="rounded-md border border-slate-300 px-2 py-1 text-sm dark:border-slate-700"
             >
-              Logout
+              {t('auth.logout')}
             </button>
           </div>
         </header>
         <main className="mx-auto w-full max-w-7xl flex-1 p-4 pb-20 md:pb-4">{children}</main>
-        <nav aria-label="Mobile navigation" className="fixed inset-x-0 bottom-0 z-30 flex justify-around border-t border-slate-200 bg-white py-2 text-sm md:hidden dark:border-slate-800 dark:bg-slate-900">
-          <NavLink to="/" className={mobileNavClass}>Devices</NavLink>
-          <NavLink to="/books" className={mobileNavClass}>Books</NavLink>
-          <NavLink to="/tags" className={mobileNavClass}>Tags</NavLink>
-          {u?.isAdmin && <NavLink to="/users" className={mobileNavClass}>Users</NavLink>}
+        <nav aria-label={t('nav.mobile')} className="fixed inset-x-0 bottom-0 z-30 flex justify-around border-t border-slate-200 bg-white py-2 text-sm md:hidden dark:border-slate-800 dark:bg-slate-900">
+          <NavLink to="/" className={mobileNavClass}>{t('nav.devices')}</NavLink>
+          <NavLink to="/books" className={mobileNavClass}>{t('nav.books')}</NavLink>
+          <NavLink to="/tags" className={mobileNavClass}>{t('nav.tags')}</NavLink>
+          {u?.isAdmin && <NavLink to="/users" className={mobileNavClass}>{t('nav.users')}</NavLink>}
         </nav>
       </div>
+      {profileOpen && <ProfileDialog initial={u?.displayName || ''} onClose={() => setProfileOpen(false)} />}
     </div>
   );
 }
@@ -139,16 +189,25 @@ export function Badge({
 }
 
 export function StatusDot({ p, lastSeen }: { p: Presence; lastSeen: string | null }) {
-  if (p === 'online') return <span title="Online" className="inline-block h-2.5 w-2.5 rounded-full bg-green-500" />;
-  if (p === 'offline')
-    return <span title={`Last seen ${relTime(lastSeen)}`} className="inline-block h-2.5 w-2.5 rounded-full bg-slate-300 dark:bg-slate-600" />;
-  return <span title="Last seen — Unknown" className="inline-block h-2.5 w-2.5 rounded-full border border-slate-400" />;
+  const { lang } = useI18n();
+  if (p === 'online') {
+    return <span title={translate(lang, 'status.online')} className="inline-block h-2.5 w-2.5 rounded-full bg-green-500" />;
+  }
+  if (p === 'offline') {
+    return (
+      <span
+        title={translate(lang, 'status.lastSeen', { time: relTime(lastSeen, lang) })}
+        className="inline-block h-2.5 w-2.5 rounded-full bg-slate-300 dark:bg-slate-600"
+      />
+    );
+  }
+  return <span title={translate(lang, 'status.unknown')} className="inline-block h-2.5 w-2.5 rounded-full border border-slate-400" />;
 }
 
-export function statusLabel(p: Presence, lastSeen: string | null): string {
-  if (p === 'online') return 'Online';
-  if (p === 'offline') return `Last seen ${relTime(lastSeen)}`;
-  return 'Last seen — Unknown';
+export function statusLabel(p: Presence, lastSeen: string | null, lang: Lang): string {
+  if (p === 'online') return translate(lang, 'status.online');
+  if (p === 'offline') return translate(lang, 'status.lastSeen', { time: relTime(lastSeen, lang) });
+  return translate(lang, 'status.unknown');
 }
 
 /** Label/value pair that never invents data: empty values become a fallback. */
@@ -156,7 +215,7 @@ export function Field({
   label,
   value,
   mono = false,
-  fallback = 'Not reported',
+  fallback,
   hint,
 }: {
   label: string;
@@ -165,15 +224,16 @@ export function Field({
   fallback?: string;
   hint?: string;
 }) {
+  const { t } = useI18n();
   const empty = value === null || value === undefined || value === '';
   return (
     <div className="min-w-0">
-      <dt className="text-[11px] font-medium uppercase tracking-wide text-slate-400">{label}</dt>
+      <dt className="text-[11px] font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">{label}</dt>
       <dd
-        className={`mt-0.5 break-words text-sm ${mono ? 'font-mono' : ''} ${empty ? 'text-slate-400' : ''}`}
+        className={`mt-0.5 break-words text-sm ${mono ? 'font-mono' : ''} ${empty ? 'text-slate-500 dark:text-slate-400' : ''}`}
         title={hint}
       >
-        {empty ? fallback : value}
+        {empty ? (fallback ?? t('common.notReported')) : value}
       </dd>
     </div>
   );
@@ -224,6 +284,7 @@ export function Modal({
   footer?: React.ReactNode;
   size?: 'md' | 'lg';
 }) {
+  const { t } = useI18n();
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
@@ -242,7 +303,7 @@ export function Modal({
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className={`max-h-[92vh] w-full overflow-y-auto rounded-t-xl bg-white p-5 shadow-xl dark:bg-slate-900 sm:rounded-xl ${
+        className={`max-h-[92vh] w-full overflow-y-auto rounded-t-xl bg-white p-5 text-slate-900 shadow-xl dark:bg-slate-900 dark:text-slate-100 sm:rounded-xl ${
           size === 'lg' ? 'sm:max-w-2xl' : 'sm:max-w-md'
         }`}
         onClick={(e) => e.stopPropagation()}
@@ -254,8 +315,8 @@ export function Modal({
           </div>
           <button
             onClick={onClose}
-            aria-label="Close"
-            className="rounded border border-slate-200 px-2 py-0.5 text-sm text-slate-500 hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"
+            aria-label={t('common.close')}
+            className="rounded border border-slate-200 px-2 py-0.5 text-sm text-slate-500 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-slate-800"
           >
             ✕
           </button>
@@ -267,14 +328,72 @@ export function Modal({
   );
 }
 
+/** Self-service display name: the value RustDesk sends to a remote PC as `my_name`. */
+function ProfileDialog({ initial, onClose }: { initial: string; onClose: () => void }) {
+  const { t } = useI18n();
+  const { notify } = useNotify();
+  const [name, setName] = useState(initial);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const save = async () => {
+    setBusy(true);
+    setErr('');
+    try {
+      const me = await api.updateMe(name.trim());
+      setDisplayName(me.display_name);
+      notify(true, t('profile.saved'));
+      onClose();
+    } catch (e) {
+      setErr(String((e as Error).message));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal
+      title={t('profile.title')}
+      subtitle={t('profile.subtitle')}
+      onClose={onClose}
+      footer={
+        <>
+          <button onClick={onClose} className={btnGhost}>{t('common.cancel')}</button>
+          <button onClick={save} disabled={busy} className={btn}>{busy ? t('common.saving') : t('common.save')}</button>
+        </>
+      }
+    >
+      <label
+        htmlFor="display-name"
+        className="mb-1 block text-[11px] font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400"
+      >
+        {t('profile.displayName')}
+      </label>
+      <input
+        id="display-name"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        maxLength={128}
+        placeholder={t('profile.placeholder')}
+        className={input}
+        autoFocus
+        onKeyDown={(e) => e.key === 'Enter' && save()}
+      />
+      <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+        {t('profile.hint')}
+      </p>
+      {err && <p className="mt-2 text-sm text-red-600 dark:text-red-400">{err}</p>}
+    </Modal>
+  );
+}
+
 export function Pagination({ page, total, size, onPage }: { page: number; total: number; size: number; onPage: (p: number) => void }) {
+  const { t } = useI18n();
   const pages = Math.max(1, Math.ceil(total / size));
   if (pages <= 1) return null;
   return (
     <div className="flex items-center gap-2 text-sm">
-      <button disabled={page <= 1} onClick={() => onPage(page - 1)} className="rounded border px-2 py-1 disabled:opacity-40 dark:border-slate-700">Previous</button>
+      <button disabled={page <= 1} onClick={() => onPage(page - 1)} className="rounded border px-2 py-1 disabled:opacity-40 dark:border-slate-700">{t('common.previous')}</button>
       <span>{page} / {pages} · {total}</span>
-      <button disabled={page >= pages} onClick={() => onPage(page + 1)} className="rounded border px-2 py-1 disabled:opacity-40 dark:border-slate-700">Next</button>
+      <button disabled={page >= pages} onClick={() => onPage(page + 1)} className="rounded border px-2 py-1 disabled:opacity-40 dark:border-slate-700">{t('common.next')}</button>
     </div>
   );
 }
@@ -283,7 +402,7 @@ export function Confirm({
   text,
   onYes,
   onNo,
-  yesLabel = 'Delete',
+  yesLabel,
   busy = false,
 }: {
   text: string;
@@ -292,6 +411,7 @@ export function Confirm({
   yesLabel?: string;
   busy?: boolean;
 }) {
+  const { t } = useI18n();
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onNo();
@@ -302,27 +422,15 @@ export function Confirm({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="presentation">
-      <div className="w-full max-w-sm rounded-lg bg-white p-4 shadow-xl dark:bg-slate-900" role="dialog" aria-modal="true">
+      <div className="w-full max-w-sm rounded-lg bg-white p-4 text-slate-900 shadow-xl dark:bg-slate-900 dark:text-slate-100" role="dialog" aria-modal="true">
         <p className="mb-4 text-sm">{text}</p>
         <div className="flex justify-end gap-2">
-          <button onClick={onNo} disabled={busy} className={btnGhost}>Cancel</button>
+          <button onClick={onNo} disabled={busy} className={btnGhost}>{t('common.cancel')}</button>
           <button onClick={onYes} disabled={busy} className={btnDanger}>
-            {busy ? 'Working…' : yesLabel}
+            {busy ? t('common.working') : (yesLabel ?? t('common.delete'))}
           </button>
         </div>
       </div>
-    </div>
-  );
-}
-
-export function Toasts({ items }: { items: Toast[] }) {
-  return (
-    <div className="fixed bottom-4 right-4 z-[60] flex max-w-sm flex-col gap-2">
-      {items.map((t) => (
-        <div key={t.id} className={`rounded-md px-3 py-2 text-sm text-white shadow ${t.ok ? 'bg-green-600' : 'bg-red-600'}`}>
-          {t.text}
-        </div>
-      ))}
     </div>
   );
 }
@@ -332,16 +440,17 @@ export function Loading({ text }: { text: string }) {
 }
 
 export function LoadError({ onRetry }: { onRetry: () => void }) {
+  const { t } = useI18n();
   return (
     <div className="py-10 text-center text-sm">
-      <p className="mb-2 text-red-600">Failed to load</p>
-      <button onClick={onRetry} className={btnGhost}>Retry</button>
+      <p className="mb-2 text-red-600 dark:text-red-400">{t('common.loadFailed')}</p>
+      <button onClick={onRetry} className={btnGhost}>{t('common.retry')}</button>
     </div>
   );
 }
 
 export const input =
-  'w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-800';
+  'w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100';
 export const btn =
   'rounded-md bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-700 disabled:opacity-50';
 export const btnDanger =

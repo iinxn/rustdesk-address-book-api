@@ -23,8 +23,9 @@
   `pytest`/`httpx` — в `requirements-dev.txt`. Полного покрытия нет
   (см. `TODO-003`).
 - `compileall` и импорт `app.main` проходят; `alembic history` видит
-  `0001–0004`. Frontend `npm run build`/`lint` в текущем окружении **не
-  проверены**: нет `node`/`npm` (см. «Заблокированные задачи»).
+  `0001–0004`. Frontend собран 2026-10-28: `npm run build` и `npm run lint`
+  проходят (Node.js 22 из временного каталога), `frontend/dist` пересобран
+  и отдаётся запущенным приложением. Постоянно `node`/`npm` в системе нет.
 - Heartbeat-фикс: per-device + aggregate per-IP лимиты, `Retry-After`,
   SQLite-запись в threadpool. Синтетически проверено 800 устройств и
   параллельный всплеск; живой прогон на production-парке не выполнялся.
@@ -32,6 +33,19 @@
   запись только для известных панели ID, перезапись — одноразовым
   разрешением из кнопки «Refresh info», лимит 6000/мин на IP. 800 устройств
   на первом старте и 800 повторных upload-ов проверены на временной БД.
+- UI: подзаголовок `Brand` — «Address Book Panel by iinxn» со ссылкой на
+  `https://github.com/iinxn`; он же виден на окне входа SPA. В боковой
+  панели остаётся ранее добавленная строка «Developed by iinxn».
+- UI-инфраструктура SPA (2026-10-28): светлая тема по умолчанию (тёмная —
+  опция), переключатель RU/EN с мгновенной перерисовкой, глобальные тосты
+  сверху (`NotificationProvider`/`useNotify`) с анимацией и зелёным/красным
+  цветом. `frontend/dist` пересобран (`index-Doz7GOma.js`,
+  `index-CB1rfIIL.css`), `npm run build`/`npm run lint` проходят.
+  См. `docs/knowledge/DECISIONS.md` DEC-016.
+- Display name: `users.display_name` редактируется админом в «Users» и
+  каждым пользователем через диалог профиля в шапке (`/api/v1/me`);
+  отдаётся в `/api/login`/`/api/currentUser` и используется клиентом как
+  `my_name` при подключении. См. `docs/knowledge/DECISIONS.md` DEC-015.
 - База знаний создана: `AGENTS.md`, `docs/project/*`, `docs/development/*`,
   `docs/SECURITY.md`, `docs/knowledge/*`, два Skill в `.opencode/skills/`.
 
@@ -289,8 +303,10 @@
 - **Две исторические БД** (`data/base.db`, `data/pc-service.db`). Их нельзя
   сливать/переключать автоматически; риск «пустой панели» остаётся
   конфигурационным.
-- **Frontend не проверен в текущем окружении.** Нет `node`/`npm`;
-  `frontend/dist` существует, но это не доказывает свежесть сборки.
+- **Frontend собирается, но Node в системе не установлен.** `npm run build`
+  и `npm run lint` проверены 2026-10-28 с временным Node.js 22 из
+  `/tmp`; `frontend/dist` gitignored, поэтому деплой обязан собирать SPA
+  (`Dockerfile`) и не может полагаться на артефакт из репозитория.
 - **Docker-путь не воспроизводим с чистого клона**, пока не выполнен
   `TODO-002`.
 - **Права `address_book_permissions` управляются вне UI** до `TODO-009`.
@@ -317,16 +333,6 @@ naive UTC в UI, `stop.sh`, `Gate.sweep`, `_tasks`), описаны в
 
 ## 5. Заблокированные задачи
 
-- [ ] **Проверить frontend `npm run build` и `npm run lint`.**
-
-  - **Приоритет:** средний. **Компонент:** `frontend/`.
-  - **Критерии готовности:** обе команды проходят; `frontend/dist`
-    пересобран; типы `api.ts`/`types.ts` совпадают с ответами backend.
-  - **Препятствие:** в текущем окружении нет `node`/`npm`
-    (`npm: command not found`). Нужен Node.js 22 LTS или доступ к
-    окружению, где он установлен.
-  - **Связанные документы:** `docs/development/WORKFLOW.md` §3,
-    `docs/development/TESTING.md` §2.
 - [ ] **Повторный живой security-прогон после фиксов.**
 
   - **Приоритет:** высокий перед публикацией. **Компонент:** весь стек.
@@ -378,6 +384,24 @@ naive UTC в UI, `stop.sh`, `Gate.sweep`, `_tasks`), описаны в
 Короткая история, полезная для понимания текущего состояния. Не добавляй
 сюда каждое изменение.
 
+- [x] **UI SPA: уведомления, светлая тема, RU/EN** (2026-10-28):
+  - `frontend/src/notifications.tsx` — один `NotificationProvider` на всё
+    приложение, `useNotify()`, тост сверху по центру (`fixed`, `z-[100]`,
+    `pointer-events-none`), появление/исчезновение через CSS-анимации,
+    2.6 с на экране, зелёный успех / красный ошибка.
+  - `frontend/src/i18n.tsx` — словари RU/EN, `I18nProvider`, `useI18n()`;
+    английский словарь задаёт тип ключей, русский проверяется `tsc`.
+    Переключатель `LangSwitch` в шапке и на экране входа, выбор в
+    `localStorage` (`ab_lang`), смена языка без перезагрузки.
+  - `useTheme()` — светлая тема по умолчанию, тёмная по явному выбору
+    (`ab_theme`), класс применяется в `main.tsx` до первого рендера.
+    Контраст: `text-slate-400` на белом заменён на `slate-500`, добавлены
+    `dark:` варианты для ошибок и модальных окон.
+  - Проверено: `npm run build` (tsc + vite), `npm run lint` — 0 ошибок
+    (15 warning, из них 11 прежних `set-state-in-effect`).
+  - Не проверено: живой браузерный прогон (в окружении нет Playwright);
+    логика подтверждена сборкой/типами и ручной сверкой кода.
+  - См. `docs/knowledge/DECISIONS.md` DEC-016, `docs/development/TESTING.md`.
 - [x] **KX-shim и супервизор.** Server-first `KeyExchange` для залогиненных
   клиентов, plain passthrough, UDP-forwarder, лимиты, backoff, health.
 - [x] **Discovery, sysinfo, bulk-операции и карточка устройства** (коммит
@@ -388,14 +412,14 @@ naive UTC в UI, `stop.sh`, `Gate.sweep`, `_tasks`), описаны в
   `stop.sh`, sweep, очистка задач.
 - [x] **Удаление customers** (миграция `0003`): модель, API, UI, шаблоны,
   документация; данные устройств/тегов не затронуты.
-- [x] **Heartbeat 429 при ~800 устройствах** (незакоммичено на момент
-  записи): per-device лимит `(id, IP)` + агрегатный per-IP cap,
-  `Retry-After`, SQLite в threadpool; `tests/test_heartbeat_rate_limit.py`
-  покрывает 800 устройств, параллельный всплеск, реальное превышение и
-  сохранение лимитов login. Синтетика: 3200 последовательных heartbeat за
-  25 с и 800 параллельных за ~4.6 с без 429; живой парк не проверялся.
+- [x] **Heartbeat 429 при ~800 устройствах** (коммит `2220b71`): per-device
+  лимит `(id, IP)` + агрегатный per-IP cap, `Retry-After`, SQLite в
+  threadpool; `tests/test_heartbeat_rate_limit.py` покрывает 800 устройств,
+  параллельный всплеск, реальное превышение и сохранение лимитов login.
+  Синтетика: 3200 последовательных heartbeat за 25 с и 800 параллельных за
+  ~4.6 с без 429; живой парк не проверялся.
   См. `docs/knowledge/ERRORS.md` ERR-014 и `DECISIONS.md` DEC-013.
-- [x] **Sysinfo 429 и перезапись при старте парка** (незакоммичено):
+- [x] **Sysinfo 429 и перезапись при старте парка** (коммит `2220b71`):
   `/api/sysinfo` стал write-once, перезапись только по кнопке «Refresh
   info» (одноразовое разрешение 120 с), строки создаются только для
   известных панели ID, лимит 6000/мин на IP, запись в threadpool.
@@ -403,6 +427,29 @@ naive UTC в UI, `stop.sh`, `Gate.sweep`, `_tasks`), описаны в
   800 повторных upload-ов без записи, разрешение из панели, неизвестные ID
   и конечность лимита. См. `docs/knowledge/ERRORS.md` ERR-015 и
   `DECISIONS.md` DEC-014.
+- [x] **Проверка frontend `npm run build` / `npm run lint`** (2026-10-28):
+  Node.js 22.23.4 взят во временный каталог `/tmp` (в системе `node`/`npm`
+  нет), `npm ci` переустановил `frontend/node_modules` (прежний каталог был
+  неполным: `.bin` содержал копии скриптов вместо симлинков),
+  `tsc -b && vite build` и `oxlint` проходят. `oxlint` — 0 ошибок,
+  11 предупреждений `react(set-state-in-effect)` в `Books/Users/Devices`
+  (не новые). `frontend/dist` пересобран (`index-BuPR4jZ7.js`), запущенное
+  приложение отдаёт новый бандл.
+  - **Не проверено:** ручная сверка `api.ts`/`types.ts` с фактическими
+    ответами backend (проверен только `tsc`).
+- [x] **Display name пользователя** (2026-10-28): `users.display_name` был
+  мёртвым полем — читался в `/api/login`, но нигде не записывался. Теперь:
+  `create_user(..., display_name=)`, `display_name` в `POST/PUT
+  /api/v1/users`, self-service `GET/PUT /api/v1/me`, диалог профиля в шапке
+  SPA, поле в «Users», флаг `create-admin --display-name`. Значение
+  нормализуется (trim + схлопывание пробелов, ≤128) и уходит клиенту как
+  `LoginRequest.my_name`. `tests/test_users_display_name.py` — 7 тестов.
+  См. `docs/knowledge/DECISIONS.md` DEC-015, `LESSONS_LEARNED.md` §15.
+  - Legacy `/panel/users` display name не показывает и не правит — при
+    необходимости отдельная задача.
+  - Смена пароля перенесена из отдельной кнопки «Пароль» в форму
+    редактирования пользователя; пустое поле означает «не менять»
+    (`PUT /api/v1/users/{id}` уже принимал необязательный `password`).
 - [x] **Система знаний для агентов** (коммит `33e4682`): `AGENTS.md`,
   `docs/project/*`, `docs/development/*`, `docs/SECURITY.md`,
   `docs/knowledge/*`, Skills `project-debugging` и `sqlite-changes`;

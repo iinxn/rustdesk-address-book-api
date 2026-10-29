@@ -9,28 +9,16 @@ export function useDebounce<T>(v: T, ms = 250): T {
   return s;
 }
 
+/**
+ * Theme preference. Light is the default for a fresh browser profile; dark is
+ * opt-in and remembered. `main.tsx` applies the saved class before the first
+ * paint, so there is no flash of the wrong theme.
+ */
 export function useTheme() {
-  const [dark, setDark] = useState(() => localStorage.getItem('ab_theme') !== 'light');
+  const [dark, setDark] = useState(() => localStorage.getItem('ab_theme') === 'dark');
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark);
     localStorage.setItem('ab_theme', dark ? 'dark' : 'light');
   }, [dark]);
   return { dark, toggle: () => setDark((d) => !d) };
-}
-
-export interface Toast {
-  id: number;
-  ok: boolean;
-  text: string;
-}
-
-let nextId = 1;
-export function useToasts() {
-  const [items, setItems] = useState<Toast[]>([]);
-  const push = (ok: boolean, text: string) => {
-    const id = nextId++;
-    setItems((l) => [...l, { id, ok, text }]);
-    setTimeout(() => setItems((l) => l.filter((t) => t.id !== id)), 3500);
-  };
-  return { items, push };
 }

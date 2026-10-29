@@ -42,11 +42,17 @@ class UserIn(BaseModel):
     username: str
     password: str
     is_admin: bool = False
+    display_name: str = ""
+
+
+class MeIn(BaseModel):
+    display_name: str = ""
 
 
 class UserOut(BaseModel):
     id: str
     username: str
+    display_name: str = ""
     is_admin: bool = False
     is_disabled: bool = False
     model_config = {"from_attributes": True}

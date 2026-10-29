@@ -111,6 +111,11 @@
 Ошибка: `401 {"error":"Invalid username or password"}` (в том числе для
 disabled-пользователя — причина не раскрывается).
 
+`display_name` — имя, заданное в панели (`/api/v1/me` или `/api/v1/users`);
+пустая строка означает «показывать логин». Клиент кэширует этот объект и
+использует `display_name` как `my_name` при подключении к другому ПК — см.
+§3.14 и `docs/knowledge/DECISIONS.md` DEC-015.
+
 ### 2.2. `POST /api/currentUser`
 
 Bearer обязателен. Возвращает тот же объект `user`, но `status` = `0`, если
@@ -596,16 +601,40 @@ ID. Ответ — `entry_out`.
 
 | Метод | Путь | Тело | Ответ |
 |---|---|---|---|
-| GET | `/api/v1/users` | — | `[{"id","username","is_admin","is_disabled"}]` |
-| POST | `/api/v1/users` | `{"username","password","is_admin":false}` | `{"id","username","is_admin","is_disabled"}` |
-| PUT | `/api/v1/users/{uid}` | любые из `username`, `is_admin`, `is_disabled`, `password` | тот же объект |
+| GET | `/api/v1/users` | — | `[{"id","username","display_name","is_admin","is_disabled"}]` |
+| POST | `/api/v1/users` | `{"username","password","is_admin":false,"display_name":""}` | `{"id","username","display_name","is_admin","is_disabled"}` |
+| PUT | `/api/v1/users/{uid}` | любые из `username`, `display_name`, `is_admin`, `is_disabled`, `password` | тот же объект |
 | DELETE | `/api/v1/users/{uid}` | — | `{"ok":true}` |
+
+`display_name` — до 128 символов после `strip`; пробелы и переводы строк
+схлопываются в один пробел, пустая строка допустима (клиент покажет логин).
+Слишком длинное значение или не строка → `400 {"detail": ...}`.
 
 Правила: нельзя снять admin с себя, нельзя disable себя, нельзя удалить себя.
 Disable или смена пароля отзывают **все** Bearer-сессии пользователя. При
 создании автоматически создаётся личная книга. Удаление пользователя
 каскадно удаляет его книги, сессии и permissions (и, следовательно, его
 entries/tags).
+
+### 3.14. Свой профиль (`/api/v1/me`)
+
+Доступно любому аутентифицированному пользователю, включая не-админа.
+
+| Метод | Путь | Тело | Ответ |
+|---|---|---|---|
+| GET | `/api/v1/me` | — | `{"id","username","display_name","is_admin","is_disabled"}` |
+| PUT | `/api/v1/me` | `{"display_name": "..."}` | тот же объект |
+
+Меняется только собственное `display_name`; роль, статус и пароль — нет.
+Правила нормализации и ошибок те же, что в §3.13.
+
+**Зачем это поле.** RustDesk-клиент при успешном `/api/login` кэширует
+объект `user` в локальную опцию `user_info` и при исходящем подключении
+отправляет `LoginRequest.my_name = user_info.display_name` (если в клиенте не
+задана локальная опция `display-name`). Именно это имя видит удалённый ПК в
+приглашении/окне подключения. Поэтому смена имени в панели применяется
+**после следующего входа** клиента, а не мгновенно. Подробности —
+`docs/knowledge/DECISIONS.md` DEC-015.
 
 ## 4. Legacy-панель `/panel/*`
 

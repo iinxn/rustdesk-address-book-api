@@ -2,10 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, sessionUser } from '../api';
 import {
   Badge, Checkbox, Confirm, Field, Layout, LoadError, Loading, Modal, Pagination,
-  StatusDot, TagBadge, Toasts, btn, btnDanger, btnGhost, btnGhostDanger, input,
+  StatusDot, TagBadge, btn, btnDanger, btnGhost, btnGhostDanger, input,
   statusLabel,
 } from '../components';
-import { useDebounce, useTheme, useToasts } from '../hooks';
+import { useDebounce, useTheme } from '../hooks';
+import { useI18n } from '../i18n';
+import type { Lang, TKey } from '../i18n';
+import { useNotify } from '../notifications';
 import { colorCss, parseUtc, relTime, textOnColor } from '../types';
 import type {
   Book, Device, DeviceDetail, DeviceDetailEntry, DeviceInfo, DiscoveredDevice,
@@ -15,17 +18,18 @@ import type {
 const SIZE = 50;
 type Tab = 'all' | 'book' | 'discovered';
 type DiscStatus = 'all' | 'online' | 'offline';
+type TFn = (key: TKey, vars?: Record<string, string | number>) => string;
 
 const emptyStats: Stats = {
   devices: 0, online: 0, offline: 0, unknown: 0, discovered: 0, discovered_online: 0,
 };
 
-function absTime(iso: string | null): string {
-  return iso ? parseUtc(iso).toLocaleString() : '';
+function absTime(iso: string | null, lang: Lang): string {
+  return iso ? parseUtc(iso).toLocaleString(lang === 'ru' ? 'ru-RU' : 'en-US') : '';
 }
 
-function lastSeenText(iso: string | null): string {
-  return iso ? `${absTime(iso)} (${relTime(iso)})` : '';
+function lastSeenText(iso: string | null, lang: Lang): string {
+  return iso ? `${absTime(iso, lang)} (${relTime(iso, lang)})` : '';
 }
 
 function sourceLabel(source: string): string {
@@ -33,24 +37,25 @@ function sourceLabel(source: string): string {
   return source.split(',').map((s) => (s === 'tcp' ? 'TCP' : s === 'udp' ? 'UDP' : s)).join(' + ');
 }
 
-function freshness(info: DeviceInfo | null): { tone: 'green' | 'amber' | 'slate'; label: string; title: string } {
+function freshness(info: DeviceInfo | null, t: TFn, lang: Lang): { tone: 'green' | 'amber' | 'slate'; label: string; title: string } {
   if (!info || !info.collected_at) {
     return {
       tone: 'slate',
-      label: 'No system report',
-      title: 'This client has not uploaded system information.',
+      label: t('dev.freshNo'),
+      title: t('dev.freshNoTitle'),
     };
   }
   const age = Date.now() - parseUtc(info.collected_at).getTime();
   if (age > 24 * 60 * 60 * 1000) {
-    return { tone: 'amber', label: 'Stale report', title: `Last uploaded ${absTime(info.collected_at)}` };
+    return { tone: 'amber', label: t('dev.freshStale'), title: t('dev.lastUploaded', { time: absTime(info.collected_at, lang) }) };
   }
-  return { tone: 'green', label: 'Fresh report', title: `Last uploaded ${absTime(info.collected_at)}` };
+  return { tone: 'green', label: t('dev.freshFresh'), title: t('dev.lastUploaded', { time: absTime(info.collected_at, lang) }) };
 }
 
 export default function Devices() {
   const { dark, toggle } = useTheme();
-  const { items: toasts, push } = useToasts();
+  const { t } = useI18n();
+  const { notify } = useNotify();
   const isAdmin = sessionUser()?.isAdmin ?? false;
 
   const [books, setBooks] = useState<Book[]>([]);
@@ -227,7 +232,7 @@ export default function Devices() {
   };
 
   const openCreate = () => {
-    if (!book) { push(false, 'Select an address book first'); return; }
+    if (!book) { notify(false, t('dev.selectBookFirst')); return; }
     tagRequest.current += 1;
     setEditing('new');
     setFormBook(book);
@@ -276,11 +281,11 @@ export default function Devices() {
     setBusy(true);
     try {
       await api.deleteEntry(confirmDel.id);
-      push(true, 'Removed from address book');
+      notify(true, t('dev.removedFromBook'));
       setConfirmDel(null);
       refreshAll();
     } catch (e) {
-      push(false, String((e as Error).message));
+      notify(false, String((e as Error).message));
     } finally {
       setBusy(false);
     }
@@ -292,16 +297,16 @@ export default function Devices() {
     try {
       const result = await api.bulkDelete([...selected]);
       if (result.deleted.length > 0) {
-        push(true, `Deleted ${result.deleted.length} device${result.deleted.length === 1 ? '' : 's'}`);
+        notify(true, t('dev.deletedCount', { n: result.deleted.length }));
       }
       if (result.failed.length > 0) {
-        push(false, `${result.failed.length} device${result.failed.length === 1 ? '' : 's'} could not be deleted (permission or already gone)`);
+        notify(false, t('dev.deleteFailedCount', { n: result.failed.length }));
       }
       setBulkDeleteOpen(false);
       setSelected(new Set(result.failed.map((f) => f.id)));
       refreshAll();
     } catch (e) {
-      push(false, String((e as Error).message));
+      notify(false, String((e as Error).message));
     } finally {
       setBusy(false);
     }
@@ -315,10 +320,10 @@ export default function Devices() {
     try {
       const result = await api.bulkTags(ids, add, remove);
       if (result.updated.length > 0) {
-        push(true, `Updated tags on ${result.updated.length} device${result.updated.length === 1 ? '' : 's'}`);
+        notify(true, t('dev.tagsUpdatedCount', { n: result.updated.length }));
       }
       if (result.failed.length > 0) {
-        push(false, `${result.failed.length} device${result.failed.length === 1 ? '' : 's'} were not updated (permission or already gone)`);
+        notify(false, t('dev.tagsFailedCount', { n: result.failed.length }));
       }
       setSelected(new Set(result.failed.map((f) => f.id)));
       refreshAll();
@@ -328,24 +333,24 @@ export default function Devices() {
   };
 
   const renderEntries = () => {
-    if (loading && devices.length === 0) return <Loading text="Loading devices" />;
+    if (loading && devices.length === 0) return <Loading text={t('dev.loadingDevices')} />;
     if (failed && devices.length === 0) return <LoadError onRetry={() => { void load(); }} />;
     if (devices.length === 0) {
       return (
         <div className="rounded-lg border border-dashed border-slate-300 py-10 text-center text-sm text-slate-500 dark:text-slate-400 dark:border-slate-700">
           {entryFiltersActive ? (
             <>
-              No devices match the current filters.
+              {t('dev.noMatchFilters')}
               <br />
-              <button onClick={clearAll} className={`${btnGhost} mt-2`}>Clear filters</button>
+              <button onClick={clearAll} className={`${btnGhost} mt-2`}>{t('dev.clearFilters')}</button>
             </>
           ) : (
             <>
-              This address book is empty.
+              {t('dev.emptyBook')}
               {canWrite && (
                 <>
                   <br />
-                  <button onClick={openCreate} className={`${btn} mt-2`}>Add your first device</button>
+                  <button onClick={openCreate} className={`${btn} mt-2`}>{t('dev.addFirst')}</button>
                 </>
               )}
             </>
@@ -361,10 +366,10 @@ export default function Devices() {
               checked={allOnPage}
               indeterminate={someOnPage}
               onChange={toggleAllOnPage}
-              label="Select all devices on this page"
+              label={t('dev.selectAllDevices')}
             />
-            <span className="font-medium">Select all on this page</span>
-            {someOnPage && <span className="ml-auto text-slate-500 dark:text-slate-400">{selected.size} selected</span>}
+            <span className="font-medium">{t('dev.selectAllPage')}</span>
+            {someOnPage && <span className="ml-auto text-slate-500 dark:text-slate-400">{t('dev.selected', { n: selected.size })}</span>}
           </div>
         )}
         {devices.map((d) => (
@@ -384,15 +389,15 @@ export default function Devices() {
   };
 
   const renderDiscovered = (allTab: boolean) => {
-    if (discLoading && disc.length === 0) return <Loading text="Loading discovered devices" />;
+    if (discLoading && disc.length === 0) return <Loading text={t('dev.loadingDiscovered')} />;
     if (discFailed && disc.length === 0) return <LoadError onRetry={() => { void load(); }} />;
     if (disc.length === 0) {
       if (allTab) {
         return (
           <p className="rounded-lg border border-dashed border-slate-300 px-3 py-5 text-center text-xs text-slate-500 dark:text-slate-400 dark:border-slate-700">
             {q !== '' || discStatus !== 'all'
-              ? 'No discovered devices match the current filters.'
-              : 'No discovered devices outside your address books. Devices seen by the server but already in a visible book are hidden here.'}
+              ? t('dev.noDiscoveredMatch')
+              : t('dev.noDiscoveredOutside')}
           </p>
         );
       }
@@ -400,16 +405,14 @@ export default function Devices() {
         <div className="rounded-lg border border-dashed border-slate-300 px-4 py-10 text-center text-sm text-slate-500 dark:text-slate-400 dark:border-slate-700">
           <p className="font-medium text-slate-600 dark:text-slate-300">
             {q !== '' || discStatus !== 'all'
-              ? 'No discovered devices match the current filters.'
-              : 'No devices have connected to this server yet.'}
+              ? t('dev.noDiscoveredMatch')
+              : t('dev.noDevicesConnected')}
           </p>
           <p className="mx-auto mt-2 max-w-lg text-xs">
-            Discovery uses the RustDesk rendezvous connection seen by the server.
-            Clients do not need an API address for this part. System details appear
-            only when a client also uploads them to the API.
+            {t('dev.discoveryExplainer')}
           </p>
           {(q !== '' || discStatus !== 'all') && (
-            <button onClick={clearAll} className={`${btnGhost} mt-3`}>Clear filters</button>
+            <button onClick={clearAll} className={`${btnGhost} mt-3`}>{t('dev.clearFilters')}</button>
           )}
         </div>
       );
@@ -433,40 +436,40 @@ export default function Devices() {
     <Layout dark={dark} onTheme={toggle}>
       <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
         <div>
-          <h1 className="text-xl font-bold">Devices</h1>
+          <h1 className="text-xl font-bold">{t('dev.title')}</h1>
           <p className="text-xs text-slate-500 dark:text-slate-400">
-            Address books, server discovery and client-reported system details.
+            {t('dev.subtitle')}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs text-slate-500 dark:text-slate-400">
             {bookMeta
-              ? `${bookMeta.online} online · ${bookMeta.offline} offline${bookMeta.unknown ? ` · ${bookMeta.unknown} unknown` : ''}`
-              : `${stats.online} online · ${stats.offline} offline`}
-            {stats.discovered > 0 && ` · discovered ${stats.discovered_online}/${stats.discovered}`}
+              ? `${t('dev.stats', { online: bookMeta.online, offline: bookMeta.offline })}${bookMeta.unknown ? t('dev.statsUnknown', { n: bookMeta.unknown }) : ''}`
+              : t('dev.stats', { online: stats.online, offline: stats.offline })}
+            {stats.discovered > 0 && t('dev.statsDiscovered', { online: stats.discovered_online, total: stats.discovered })}
           </span>
           {tab !== 'discovered' && canWrite && (
-            <button className={btn} onClick={openCreate}>+ Add device</button>
+            <button className={btn} onClick={openCreate}>{t('dev.add')}</button>
           )}
         </div>
       </div>
 
       <div className="mb-3 flex gap-1 overflow-x-auto rounded-lg border border-slate-200 bg-white p-1 dark:border-slate-800 dark:bg-slate-900">
-        <TabButton active={tab === 'all'} onClick={() => setTab('all')}>All devices</TabButton>
+        <TabButton active={tab === 'all'} onClick={() => setTab('all')}>{t('dev.tabAll')}</TabButton>
         <TabButton active={tab === 'book'} onClick={() => setTab('book')} count={bookMeta?.devices}>
-          Address book
+          {t('dev.tabBook')}
         </TabButton>
         <TabButton active={tab === 'discovered'} onClick={() => setTab('discovered')} count={stats.discovered}>
-          Discovered
+          {t('dev.tabDiscovered')}
         </TabButton>
       </div>
 
       <div className="mb-3 flex flex-wrap items-center gap-2">
         {tab !== 'discovered' && (
-          <select aria-label="Address book" value={book} onChange={(e) => setBook(e.target.value)} className={`${input} max-w-full sm:w-auto`}>
+          <select aria-label={t('dev.selectBook')} value={book} onChange={(e) => setBook(e.target.value)} className={`${input} max-w-full sm:w-auto`}>
             {books.map((b) => (
               <option key={b.id} value={b.id}>
-                {b.name}{b.rule < 2 ? ' (read-only)' : ''}
+                {b.name}{b.rule < 2 ? t('dev.readOnly') : ''}
               </option>
             ))}
           </select>
@@ -474,59 +477,59 @@ export default function Devices() {
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search ID, hostname, user, note…"
+          placeholder={t('dev.searchPlaceholder')}
           className={`${input} w-full sm:max-w-xs`}
         />
         {tab !== 'discovered' && (
           <>
-            <select aria-label="Sort devices" value={sort} onChange={(e) => setSort(e.target.value)} className={`${input} sm:w-auto`} title="Sort">
-              <option value="status">Status + Alias</option>
-              <option value="alias">Alias</option>
-              <option value="rustdesk_id">RustDesk ID</option>
-              <option value="last_seen">Last seen</option>
+            <select aria-label={t('dev.sortLabel')} value={sort} onChange={(e) => setSort(e.target.value)} className={`${input} sm:w-auto`} title={t('dev.sortTitle')}>
+              <option value="status">{t('dev.sortStatus')}</option>
+              <option value="alias">{t('dev.sortAlias')}</option>
+              <option value="rustdesk_id">{t('dev.sortId')}</option>
+              <option value="last_seen">{t('dev.sortLastSeen')}</option>
             </select>
-            <select aria-label="Presence filter" value={presence} onChange={(e) => setPresence(e.target.value)} className={`${input} sm:w-auto`}>
-              <option value="">All states</option>
-              <option value="online">Online</option>
-              <option value="offline">Offline</option>
-              <option value="unknown">Unknown</option>
+            <select aria-label={t('dev.presenceFilter')} value={presence} onChange={(e) => setPresence(e.target.value)} className={`${input} sm:w-auto`}>
+              <option value="">{t('dev.allStates')}</option>
+              <option value="online">{t('dev.online')}</option>
+              <option value="offline">{t('dev.offline')}</option>
+              <option value="unknown">{t('dev.unknown')}</option>
             </select>
           </>
         )}
         {tab !== 'book' && (
-          <select aria-label="Discovery status" value={discStatus} onChange={(e) => setDiscStatus(e.target.value as DiscStatus)} className={`${input} sm:w-auto`}>
-            <option value="all">All discovered</option>
-            <option value="online">Discovered online</option>
-            <option value="offline">Discovered offline</option>
+          <select aria-label={t('dev.discoveryStatus')} value={discStatus} onChange={(e) => setDiscStatus(e.target.value as DiscStatus)} className={`${input} sm:w-auto`}>
+            <option value="all">{t('dev.allDiscovered')}</option>
+            <option value="online">{t('dev.discoveredOnline')}</option>
+            <option value="offline">{t('dev.discoveredOffline')}</option>
           </select>
         )}
-        {filtersActive && <button onClick={clearAll} className={btnGhost}>Clear filters</button>}
+        {filtersActive && <button onClick={clearAll} className={btnGhost}>{t('dev.clearFilters')}</button>}
       </div>
 
       {tab !== 'discovered' && (
         <div className="mb-3 flex flex-wrap items-center gap-1.5">
           <button
             onClick={() => setSelTags([])}
-            className={`rounded-full px-2.5 py-0.5 text-xs ${selTags.length === 0 ? 'bg-slate-800 text-white dark:bg-slate-200 dark:text-slate-900' : 'bg-slate-200 dark:bg-slate-700'}`}
+            className={`rounded-full px-2.5 py-0.5 text-xs ${selTags.length === 0 ? 'bg-slate-800 text-white dark:bg-slate-200 dark:text-slate-900' : 'bg-slate-200 text-slate-800 dark:bg-slate-700 dark:text-slate-200'}`}
           >
-            All tags
+            {t('dev.allTags')}
           </button>
-          {tags.map((t) => {
-            const on = selTags.includes(t.name);
+          {tags.map((tag) => {
+            const on = selTags.includes(tag.name);
             return (
               <button
-                key={t.id}
-                onClick={() => setSelTags((list) => (list.includes(t.name) ? list.filter((x) => x !== t.name) : [...list, t.name]))}
-                title={`${t.devices} device${t.devices === 1 ? '' : 's'}`}
+                key={tag.id}
+                onClick={() => setSelTags((list) => (list.includes(tag.name) ? list.filter((x) => x !== tag.name) : [...list, tag.name]))}
+                title={t('dev.tagDevices', { n: tag.devices })}
                 className={`rounded-full px-2.5 py-0.5 text-xs ${on ? 'ring-2 ring-slate-500 ring-offset-1' : 'hover:ring-2 hover:ring-slate-400'}`}
-                style={{ backgroundColor: colorCss(t.color), color: textOnColor(colorCss(t.color)) }}
+                style={{ backgroundColor: colorCss(tag.color), color: textOnColor(colorCss(tag.color)) }}
               >
-                {t.name}
+                {tag.name}
               </button>
             );
           })}
           {selTags.length > 1 && (
-            <button onClick={() => setMode(mode === 'and' ? 'or' : 'and')} className={btnGhost} title="Match all selected tags or any of them">
+            <button onClick={() => setMode(mode === 'and' ? 'or' : 'and')} className={btnGhost} title={t('dev.matchMode')}>
               {mode.toUpperCase()}
             </button>
           )}
@@ -535,23 +538,23 @@ export default function Devices() {
 
       {failed && devices.length > 0 && (
         <div className="mb-2 flex flex-wrap items-center gap-2 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
-          Refresh failed — showing the previous result.
-          <button onClick={() => { void load(); }} className="underline">Retry</button>
+          {t('dev.refreshFailed')}
+          <button onClick={() => { void load(); }} className="underline">{t('common.retry')}</button>
         </div>
       )}
       {discFailed && disc.length > 0 && (
         <div className="mb-2 flex flex-wrap items-center gap-2 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
-          Discovery refresh failed — showing the previous result.
-          <button onClick={() => { void load(); }} className="underline">Retry</button>
+          {t('dev.discoveryRefreshFailed')}
+          <button onClick={() => { void load(); }} className="underline">{t('common.retry')}</button>
         </div>
       )}
 
       {showEntries && (
         <section className={showDisc ? 'mb-6' : ''}>
           <SectionHeader
-            title="Address book"
-            subtitle={bookMeta ? `${bookMeta.name}${bookMeta.rule < 2 ? ' · read-only' : ''}` : undefined}
-            right={loading && devices.length > 0 ? <span className="text-xs text-slate-400">Updating…</span> : undefined}
+            title={t('dev.sectionBook')}
+            subtitle={bookMeta ? `${bookMeta.name}${bookMeta.rule < 2 ? t('dev.sectionBookReadOnly') : ''}` : undefined}
+            right={loading && devices.length > 0 ? <span className="text-xs text-slate-500 dark:text-slate-400">{t('dev.updating')}</span> : undefined}
           />
           {renderEntries()}
           <div className="mt-3 flex justify-end">
@@ -563,17 +566,17 @@ export default function Devices() {
       {showDisc && (
         <section>
           <SectionHeader
-            title={tab === 'all' ? 'Discovered, not in your address books' : 'Discovered devices'}
+            title={tab === 'all' ? t('dev.discoveredNotInBooks') : t('dev.discoveredDevices')}
             subtitle={
               tab === 'all'
-                ? 'Seen by the RustDesk server but not linked to a visible address book.'
-                : 'Rendezvous evidence from the server, including devices already in address books.'
+                ? t('dev.discoveredSubtitleAll')
+                : t('dev.discoveredSubtitle')
             }
-            right={discLoading && disc.length > 0 ? <span className="text-xs text-slate-400">Updating…</span> : undefined}
+            right={discLoading && disc.length > 0 ? <span className="text-xs text-slate-500 dark:text-slate-400">{t('dev.updating')}</span> : undefined}
           />
           {disc.length > 0 && (
             <div className="mb-2 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-200">
-              Discovery needs no client API setting. Hostname, OS and hardware details require a custom API server on the client.
+              {t('dev.discoveryNote')}
             </div>
           )}
           {renderDiscovered(tab === 'all')}
@@ -585,10 +588,10 @@ export default function Devices() {
 
       {selected.size > 0 && tab !== 'discovered' && (
         <div className="sticky bottom-2 z-20 mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-blue-200 bg-white/95 px-3 py-2 shadow-lg backdrop-blur dark:border-blue-900 dark:bg-slate-900/95">
-          <span className="text-sm font-medium">{selected.size} selected</span>
-          <button className={btnGhost} onClick={() => setBulkTagOpen(true)}>Add / remove tags</button>
-          <button className={btnDanger} onClick={() => setBulkDeleteOpen(true)}>Delete</button>
-          <button className={`${btnGhost} ml-auto`} onClick={() => setSelected(new Set())}>Clear selection</button>
+          <span className="text-sm font-medium">{t('dev.selected', { n: selected.size })}</span>
+          <button className={btnGhost} onClick={() => setBulkTagOpen(true)}>{t('dev.addRemoveTags')}</button>
+          <button className={btnDanger} onClick={() => setBulkDeleteOpen(true)}>{t('common.delete')}</button>
+          <button className={`${btnGhost} ml-auto`} onClick={() => setSelected(new Set())}>{t('dev.clearSelection')}</button>
         </div>
       )}
 
@@ -599,7 +602,6 @@ export default function Devices() {
           isAdmin={isAdmin}
           canWriteBook={canWriteBook}
           canAddToBook={writableBooks.length > 0}
-          notify={push}
           onClose={() => setDetailRid(null)}
           onChanged={refreshAll}
           onEdit={(d, bookId) => openEdit(d, bookId)}
@@ -617,18 +619,18 @@ export default function Devices() {
           onSaved={(msg) => {
             const wasEdit = editing !== 'new';
             setEditing(null);
-            push(true, msg);
+            notify(true, msg);
             refreshAll();
             if (wasEdit) setDetailReload((v) => v + 1);
           }}
-          onError={(m) => push(false, m)}
+          onError={(m) => notify(false, m)}
         />
       )}
 
       {confirmDel && (
         <Confirm
-          text={`Remove ${confirmDel.alias || confirmDel.hostname || confirmDel.rustdesk_id} from the address book? Tags themselves are not deleted.`}
-          yesLabel="Remove"
+          text={t('dev.removeConfirm', { name: confirmDel.alias || confirmDel.hostname || confirmDel.rustdesk_id })}
+          yesLabel={t('common.remove')}
           busy={busy}
           onYes={() => { void doDelete(); }}
           onNo={() => setConfirmDel(null)}
@@ -636,7 +638,7 @@ export default function Devices() {
       )}
       {bulkDeleteOpen && (
         <Confirm
-          text={`Delete ${selected.size} selected device${selected.size === 1 ? '' : 's'} from the address book? Tags themselves are not deleted.`}
+          text={t('dev.bulkDeleteConfirm', { n: selected.size })}
           busy={busy}
           onYes={() => { void doBulkDelete(); }}
           onNo={() => setBulkDeleteOpen(false)}
@@ -658,14 +660,12 @@ export default function Devices() {
           onClose={() => setAddTarget(null)}
           onSaved={(d) => {
             setAddTarget(null);
-            push(true, `Added ${d.rustdesk_id} to the address book`);
+            notify(true, t('dev.addedToBook', { id: d.rustdesk_id }));
             setDetailReload((v) => v + 1);
             refreshAll();
           }}
         />
       )}
-
-      <Toasts items={toasts} />
     </Layout>
   );
 }
@@ -722,13 +722,14 @@ function EntryRow({ d, selectable, checked, onCheck, onOpen, onEdit, onDelete }:
   onEdit: () => void;
   onDelete: () => void;
 }) {
+  const { t, lang } = useI18n();
   const name = d.alias || d.hostname || d.rustdesk_id;
   const meta = [d.os || d.platform, d.ip].filter(Boolean).join(' · ');
   return (
     <div className="flex items-start gap-2 border-b border-slate-100 px-2 py-2.5 last:border-0 sm:gap-3 sm:px-3 dark:border-slate-800">
       {selectable && (
         <div className="pt-1">
-          <Checkbox checked={checked} onChange={onCheck} label={`Select ${name}`} />
+          <Checkbox checked={checked} onChange={onCheck} label={t('dev.selectOne', { name })} />
         </div>
       )}
       <button onClick={onOpen} className="flex min-w-0 flex-1 items-start gap-2 text-left sm:gap-3">
@@ -737,28 +738,28 @@ function EntryRow({ d, selectable, checked, onCheck, onOpen, onEdit, onDelete }:
           <span className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
             <span className="truncate font-medium">{name}</span>
             {d.hostname && d.hostname !== name && (
-              <span className="truncate text-xs text-slate-400">{d.hostname}</span>
+              <span className="truncate text-xs text-slate-500 dark:text-slate-400">{d.hostname}</span>
             )}
-            {d.has_info && <Badge tone="blue" title="The client uploaded system information">info</Badge>}
+            {d.has_info && <Badge tone="blue" title={t('dev.infoBadgeTitle')}>{t('dev.infoBadge')}</Badge>}
           </span>
           <span className="block font-mono text-xs text-slate-500 dark:text-slate-400">{d.rustdesk_id}</span>
           <span className="block truncate text-xs text-slate-500 dark:text-slate-400">
-            {meta || 'OS and IP not reported'}
+            {meta || t('dev.osIpNotReported')}
           </span>
           {d.tag_objs.length > 0 && (
             <span className="mt-1 flex flex-wrap gap-1">
-              {d.tag_objs.map((t) => <TagBadge key={t.id} name={t.name} color={t.color} />)}
+              {d.tag_objs.map((tag) => <TagBadge key={tag.id} name={tag.name} color={tag.color} />)}
             </span>
           )}
-          <span className="block text-xs text-slate-400" title={d.last_seen || undefined}>
-            {statusLabel(d.presence, d.last_seen)}
+          <span className="block text-xs text-slate-500 dark:text-slate-400" title={d.last_seen || undefined}>
+            {statusLabel(d.presence, d.last_seen, lang)}
           </span>
         </span>
       </button>
       {selectable && (
         <div className="hidden shrink-0 gap-1 sm:flex">
-          <button className={btnGhost} onClick={onEdit}>Edit</button>
-          <button className={btnGhostDanger} onClick={onDelete}>Delete</button>
+          <button className={btnGhost} onClick={onEdit}>{t('common.edit')}</button>
+          <button className={btnGhostDanger} onClick={onDelete}>{t('common.delete')}</button>
         </div>
       )}
     </div>
@@ -771,6 +772,7 @@ function DiscoveredRow({ d, onOpen, onAdd, canAdd }: {
   onAdd: () => void;
   canAdd: boolean;
 }) {
+  const { t, lang } = useI18n();
   const info = d.info;
   const name = info?.hostname || d.rustdesk_id;
   const p: Presence = d.online ? 'online' : 'offline';
@@ -785,37 +787,37 @@ function DiscoveredRow({ d, onOpen, onAdd, canAdd }: {
       <button onClick={onOpen} className="min-w-0 flex-1 text-left">
         <span className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
           <span className="truncate font-medium">{name}</span>
-          {info?.username && <span className="text-xs text-slate-400">@{info.username}</span>}
+          {info?.username && <span className="text-xs text-slate-500 dark:text-slate-400">@{info.username}</span>}
           {!info && (
-            <Badge tone="amber" title="The client has not uploaded system information">
-              no sysinfo
+            <Badge tone="amber" title={t('dev.noSysinfoTitle')}>
+              {t('dev.noSysinfo')}
             </Badge>
           )}
         </span>
         <span className="block font-mono text-xs text-slate-500 dark:text-slate-400">{d.rustdesk_id}</span>
         <span className="block truncate text-xs text-slate-500 dark:text-slate-400">
-          {meta || 'OS, client version and IP not reported'}
+          {meta || t('dev.osVersionIpNotReported')}
         </span>
-        <span className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-xs text-slate-400">
-          <span>{statusLabel(p, d.last_seen)}</span>
-          <span>· first seen {relTime(d.first_seen)}</span>
-          {d.source && <span>· via {sourceLabel(d.source)}</span>}
+        <span className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-xs text-slate-500 dark:text-slate-400">
+          <span>{statusLabel(p, d.last_seen, lang)}</span>
+          <span>{t('dev.firstSeenVia', { time: relTime(d.first_seen, lang) })}</span>
+          {d.source && <span>{t('dev.via', { source: sourceLabel(d.source) })}</span>}
         </span>
         {d.in_books.length > 0 && (
           <span className="mt-1 block text-xs text-green-700 dark:text-green-400">
-            In book: {d.in_books.map((b) => b.name).join(', ')}
+            {t('dev.inBook', { books: d.in_books.map((b) => b.name).join(', ') })}
           </span>
         )}
       </button>
       {d.in_books.length === 0 && canAdd && (
-        <button className={`${btn} shrink-0`} onClick={onAdd}>Add to book</button>
+        <button className={`${btn} shrink-0`} onClick={onAdd}>{t('dev.addToBook')}</button>
       )}
     </div>
   );
 }
 
 function DetailDrawer({
-  rid, reloadToken, isAdmin, canWriteBook, canAddToBook, notify,
+  rid, reloadToken, isAdmin, canWriteBook, canAddToBook,
   onClose, onChanged, onEdit, onAddToBook,
 }: {
   rid: string;
@@ -823,12 +825,13 @@ function DetailDrawer({
   isAdmin: boolean;
   canWriteBook: (bookId: string) => boolean;
   canAddToBook: boolean;
-  notify: (ok: boolean, text: string) => void;
   onClose: () => void;
   onChanged: () => void;
   onEdit: (d: Device, bookId: string) => void;
   onAddToBook: (d: DiscoveredDevice) => void;
 }) {
+  const { t, lang } = useI18n();
+  const { notify } = useNotify();
   const [data, setData] = useState<DeviceDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -861,7 +864,7 @@ function DetailDrawer({
   const primary = entries[0];
   const name = info?.hostname || primary?.alias || rid;
   const presence: Presence = data?.online ? 'online' : data?.last_seen ? 'offline' : 'unknown';
-  const fresh = freshness(info);
+  const fresh = freshness(info, t, lang);
 
   const refresh = async () => {
     if (busy) return;
@@ -871,8 +874,8 @@ function DetailDrawer({
       notify(
         true,
         data?.online
-          ? 'Refresh requested. The client will report on its next heartbeat (about 15 s).'
-          : 'Refresh requested. It will apply when the device reconnects (within 30 minutes).',
+          ? t('dev.refreshOnline')
+          : t('dev.refreshOffline'),
       );
       window.setTimeout(() => { void load(true); }, 8000);
     } catch (e) {
@@ -887,7 +890,7 @@ function DetailDrawer({
     setBusy(true);
     try {
       await api.deleteEntry(delEntry.id);
-      notify(true, 'Removed from address book');
+      notify(true, t('dev.removedFromBook'));
       // Without a discovery row a non-admin can no longer open this card;
       // close it instead of leaving stale data on screen.
       const wasLastSource = entries.length === 1 && !disc;
@@ -907,7 +910,7 @@ function DetailDrawer({
     setBusy(true);
     try {
       await api.forgetDiscovered(rid);
-      notify(true, 'Discovery record removed');
+      notify(true, t('dev.discoveryRemoved'));
       setForgetOpen(false);
       onChanged();
       onClose();
@@ -920,11 +923,11 @@ function DetailDrawer({
 
   const cores = info
     ? (info.cpu_logical && info.cpu_physical
-      ? `${info.cpu_logical} logical / ${info.cpu_physical} physical`
+      ? t('dev.coresBoth', { logical: info.cpu_logical, physical: info.cpu_physical })
       : info.cpu_logical
-        ? `${info.cpu_logical} logical`
+        ? t('dev.coresLogical', { n: info.cpu_logical })
         : info.cpu_physical
-          ? `${info.cpu_physical} physical`
+          ? t('dev.coresPhysical', { n: info.cpu_physical })
           : '')
     : '';
 
@@ -932,11 +935,11 @@ function DetailDrawer({
     <>
       <div className="fixed inset-0 z-40 flex justify-end bg-black/30" onClick={onClose} role="presentation">
         <div
-          className="flex h-full w-full max-w-xl flex-col overflow-y-auto bg-white shadow-xl dark:bg-slate-900"
+          className="flex h-full w-full max-w-xl flex-col overflow-y-auto bg-white text-slate-900 shadow-xl dark:bg-slate-900 dark:text-slate-100"
           onClick={(e) => e.stopPropagation()}
           role="dialog"
           aria-modal="true"
-          aria-label={`Device ${rid}`}
+          aria-label={t('dev.device', { id: rid })}
         >
           <div className="sticky top-0 z-10 flex items-start justify-between gap-3 border-b border-slate-200 bg-white px-5 py-4 dark:border-slate-800 dark:bg-slate-900">
             <div className="min-w-0">
@@ -945,16 +948,16 @@ function DetailDrawer({
               <div className="mt-1 flex flex-wrap items-center gap-1.5">
                 <span className="inline-flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
                   <StatusDot p={presence} lastSeen={data?.last_seen ?? null} />
-                  {statusLabel(presence, data?.last_seen ?? null)}
+                  {statusLabel(presence, data?.last_seen ?? null, lang)}
                 </span>
-                {data?.sources.includes('address_book') && <Badge tone="slate">Address book</Badge>}
-                {data?.sources.includes('discovery') && <Badge tone="green">Discovered</Badge>}
-                {data?.sources.includes('sysinfo') && <Badge tone="blue">Client report</Badge>}
+                {data?.sources.includes('address_book') && <Badge tone="slate">{t('dev.sectionBook')}</Badge>}
+                {data?.sources.includes('discovery') && <Badge tone="green">{t('dev.tabDiscovered')}</Badge>}
+                {data?.sources.includes('sysinfo') && <Badge tone="blue">{t('dev.clientReport')}</Badge>}
               </div>
             </div>
             <button
               onClick={onClose}
-              aria-label="Close"
+              aria-label={t('common.close')}
               className="rounded border border-slate-200 px-2 py-0.5 text-sm text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"
             >
               ✕
@@ -965,87 +968,86 @@ function DetailDrawer({
             {error && (
               <div className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
                 {error}
-                <button onClick={() => { void load(); }} className="ml-2 underline">Retry</button>
+                <button onClick={() => { void load(); }} className="ml-2 underline">{t('common.retry')}</button>
               </div>
             )}
-            {!data && loading && <Loading text="Loading device" />}
-            {!data && !loading && !error && <p className="text-sm text-slate-500 dark:text-slate-400">No data.</p>}
+            {!data && loading && <Loading text={t('dev.loadingDevice')} />}
+            {!data && !loading && !error && <p className="text-sm text-slate-500 dark:text-slate-400">{t('dev.noData')}</p>}
 
             {data && (
               <>
                 <section>
-                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">Connection</h3>
+                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">{t('dev.connection')}</h3>
                   <dl className="grid grid-cols-2 gap-x-4 gap-y-3">
-                    <Field label="Status" value={statusLabel(presence, data.last_seen)} />
-                    <Field label="Last seen" value={lastSeenText(data.last_seen)} />
-                    <Field label="IP address" value={data.last_ip} mono />
+                    <Field label={t('dev.status')} value={statusLabel(presence, data.last_seen, lang)} />
+                    <Field label={t('dev.lastSeen')} value={lastSeenText(data.last_seen, lang)} />
+                    <Field label={t('dev.ip')} value={data.last_ip} mono />
                     <Field
-                      label="Detected via"
+                      label={t('dev.detectedVia')}
                       value={disc ? sourceLabel(disc.source) : ''}
-                      fallback={entries.length > 0 ? 'Address book heartbeat' : 'Not available'}
+                      fallback={entries.length > 0 ? t('dev.addressBookHeartbeat') : t('dev.notAvailable')}
                     />
-                    <Field label="First seen" value={disc?.first_seen ? absTime(disc.first_seen) : ''} />
-                    <Field label="Last connected" value={disc?.last_connected ? absTime(disc.last_connected) : ''} />
-                    <Field label="Last disconnected" value={disc?.last_disconnected ? absTime(disc.last_disconnected) : ''} />
+                    <Field label={t('dev.firstSeen')} value={disc?.first_seen ? absTime(disc.first_seen, lang) : ''} />
+                    <Field label={t('dev.lastConnected')} value={disc?.last_connected ? absTime(disc.last_connected, lang) : ''} />
+                    <Field label={t('dev.lastDisconnected')} value={disc?.last_disconnected ? absTime(disc.last_disconnected, lang) : ''} />
                     <Field
-                      label="Address books"
+                      label={t('dev.addressBooks')}
                       value={entries.map((e) => e.book_name).join(', ')}
-                      fallback="Not in a visible book"
+                      fallback={t('dev.notInVisibleBook')}
                     />
                   </dl>
                 </section>
 
                 <section>
                   <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                    <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-400">System</h3>
+                    <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">{t('dev.system')}</h3>
                     <Badge tone={fresh.tone} title={fresh.title}>{fresh.label}</Badge>
                   </div>
                   <dl className="grid grid-cols-2 gap-x-4 gap-y-3">
-                    <Field label="Hostname" value={info?.hostname || primary?.hostname || ''} />
-                    <Field label="Username" value={info?.username || primary?.username || ''} />
-                    <Field label="Operating system" value={info?.os || primary?.platform || ''} />
-                    <Field label="OS family" value={info?.os_name || ''} />
-                    <Field label="OS version" value={info?.os_version || ''} />
-                    <Field label="Client version" value={info?.version || ''} />
-                    <Field label="Report uploaded" value={info?.collected_at ? lastSeenText(info.collected_at) : ''} />
+                    <Field label={t('dev.hostname')} value={info?.hostname || primary?.hostname || ''} />
+                    <Field label={t('dev.username')} value={info?.username || primary?.username || ''} />
+                    <Field label={t('dev.operatingSystem')} value={info?.os || primary?.platform || ''} />
+                    <Field label={t('dev.osFamily')} value={info?.os_name || ''} />
+                    <Field label={t('dev.osVersion')} value={info?.os_version || ''} />
+                    <Field label={t('dev.clientVersion')} value={info?.version || ''} />
+                    <Field label={t('dev.reportUploaded')} value={info?.collected_at ? lastSeenText(info.collected_at, lang) : ''} />
                     <Field
-                      label="Last heartbeat"
-                      value={info?.last_heartbeat_at ? lastSeenText(info.last_heartbeat_at) : ''}
-                      fallback="No heartbeat received"
+                      label={t('dev.lastHeartbeat')}
+                      value={info?.last_heartbeat_at ? lastSeenText(info.last_heartbeat_at, lang) : ''}
+                      fallback={t('dev.noHeartbeat')}
                     />
                   </dl>
                 </section>
 
                 <section>
-                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">Hardware</h3>
+                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">{t('dev.hardware')}</h3>
                   <dl className="grid grid-cols-2 gap-x-4 gap-y-3">
-                    <Field label="CPU" value={info?.cpu_model || info?.cpu || ''} hint={info?.cpu} />
-                    <Field label="Frequency" value={info?.cpu_freq_ghz ? `${info.cpu_freq_ghz} GHz` : ''} />
-                    <Field label="Cores" value={cores} />
+                    <Field label={t('dev.cpu')} value={info?.cpu_model || info?.cpu || ''} hint={info?.cpu} />
+                    <Field label={t('dev.frequency')} value={info?.cpu_freq_ghz ? `${info.cpu_freq_ghz} GHz` : ''} />
+                    <Field label={t('dev.cores')} value={cores} />
                     <Field
-                      label="Total RAM"
+                      label={t('dev.totalRam')}
                       value={info?.memory_gb ? `${info.memory_gb} GB` : info?.memory || ''}
                     />
                   </dl>
                 </section>
 
-                <div className="rounded-lg border border-dashed border-slate-300 p-3 text-xs text-slate-500 dark:text-slate-400 dark:border-slate-700 dark:text-slate-400">
+                <div className="rounded-lg border border-dashed border-slate-300 p-3 text-xs text-slate-500 dark:border-slate-700 dark:text-slate-400">
                   <div className="mb-1 font-medium text-slate-600 dark:text-slate-300">
-                    Not provided by the stock RustDesk client
+                    {t('dev.notProvidedTitle')}
                   </div>
                   <div className="mb-2 flex flex-wrap gap-1">
-                    {['Architecture', 'RAM usage', 'GPU', 'Disks', 'Network adapters'].map((x) => (
+                    {[t('dev.fieldArchitecture'), t('dev.fieldRamUsage'), t('dev.fieldGpu'), t('dev.fieldDisks'), t('dev.fieldNetwork')].map((x) => (
                       <Badge key={x} tone="slate">{x}</Badge>
                     ))}
                   </div>
-                  The client uploads hostname, username, OS, CPU model/cores, total RAM and its
-                  version. These fields stay unavailable instead of being guessed.
+                  {t('dev.notProvidedNote')}
                 </div>
 
                 <section>
-                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">Address book</h3>
+                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">{t('dev.sectionBook')}</h3>
                   {entries.length === 0 ? (
-                    <p className="text-sm text-slate-500 dark:text-slate-400">This device is not in any address book you can see.</p>
+                    <p className="text-sm text-slate-500 dark:text-slate-400">{t('dev.notInVisibleBook')}</p>
                   ) : (
                     <div className="space-y-2">
                       {entries.map((e: DeviceDetailEntry) => (
@@ -1054,11 +1056,11 @@ function DetailDrawer({
                             <div className="min-w-0">
                               <div className="truncate font-medium">{e.alias || e.rustdesk_id}</div>
                               <div className="text-xs text-slate-500 dark:text-slate-400">
-                                {e.book_name} · {statusLabel(e.presence, e.last_seen)}
+                                {e.book_name} · {statusLabel(e.presence, e.last_seen, lang)}
                               </div>
                               {e.tag_objs.length > 0 && (
                                 <div className="mt-1 flex flex-wrap gap-1">
-                                  {e.tag_objs.map((t) => <TagBadge key={t.id} name={t.name} color={t.color} />)}
+                                  {e.tag_objs.map((tag) => <TagBadge key={tag.id} name={tag.name} color={tag.color} />)}
                                 </div>
                               )}
                             </div>
@@ -1068,22 +1070,22 @@ function DetailDrawer({
                                 onClick={() => onEdit(e, e.book_id)}
                                 disabled={!canWriteBook(e.book_id)}
                               >
-                                Edit
+                                {t('common.edit')}
                               </button>
                               <button
                                 className={btnGhostDanger}
                                 onClick={() => setDelEntry(e)}
                                 disabled={!canWriteBook(e.book_id)}
                               >
-                                Delete
+                                {t('common.delete')}
                               </button>
                             </div>
                           </div>
                           {e.note && (
                             <p className="mt-2 whitespace-pre-wrap text-xs text-slate-500 dark:text-slate-400">{e.note}</p>
                           )}
-                          <div className="mt-1 text-[11px] text-slate-400">
-                            {e.password_configured ? 'Stored password configured' : 'No stored password'}
+                          <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+                            {e.password_configured ? t('dev.storedPassword') : t('dev.noStoredPassword')}
                           </div>
                         </div>
                       ))}
@@ -1096,30 +1098,30 @@ function DetailDrawer({
 
           <div className="sticky bottom-0 flex flex-wrap gap-2 border-t border-slate-200 bg-white px-5 py-3 dark:border-slate-800 dark:bg-slate-900">
             <button className={btn} onClick={() => { void refresh(); }} disabled={busy || !data}>
-              {busy ? 'Working…' : 'Refresh info'}
+              {busy ? t('common.working') : t('dev.refreshInfo')}
             </button>
             {disc && disc.in_books.length === 0 && (
               <button
                 className={btnGhost}
                 onClick={() => onAddToBook(disc)}
                 disabled={!canAddToBook}
-                title={canAddToBook ? undefined : 'You have no writable address books'}
+                title={canAddToBook ? undefined : t('dev.noWritableBooks')}
               >
-                Add to book
+                {t('dev.addToBook')}
               </button>
             )}
             {isAdmin && disc && (
-              <button className={btnGhostDanger} onClick={() => setForgetOpen(true)}>Forget</button>
+              <button className={btnGhostDanger} onClick={() => setForgetOpen(true)}>{t('dev.forget')}</button>
             )}
-            <button className={`${btnGhost} ml-auto`} onClick={onClose}>Close</button>
+            <button className={`${btnGhost} ml-auto`} onClick={onClose}>{t('common.close')}</button>
           </div>
         </div>
       </div>
 
       {delEntry && (
         <Confirm
-          text={`Remove ${delEntry.alias || delEntry.rustdesk_id} from the address book? Tags themselves are not deleted.`}
-          yesLabel="Remove"
+          text={t('dev.removeConfirm', { name: delEntry.alias || delEntry.rustdesk_id })}
+          yesLabel={t('common.remove')}
           busy={busy}
           onYes={() => { void removeEntry(); }}
           onNo={() => setDelEntry(null)}
@@ -1127,8 +1129,8 @@ function DetailDrawer({
       )}
       {forgetOpen && (
         <Confirm
-          text={`Remove the discovery record for ${rid}? Address book entries and the stored system report are not deleted.`}
-          yesLabel="Forget"
+          text={t('dev.forgetConfirm', { id: rid })}
+          yesLabel={t('dev.forget')}
           busy={busy}
           onYes={() => { void forget(); }}
           onNo={() => setForgetOpen(false)}
@@ -1145,6 +1147,7 @@ function AddDiscoveredModal({ device, books, defaultBook, onClose, onSaved }: {
   onClose: () => void;
   onSaved: (d: DiscoveredDevice) => void;
 }) {
+  const { t } = useI18n();
   const initialBook = books.some((b) => b.id === defaultBook) ? defaultBook : books[0]?.id || '';
   const [bookId, setBookId] = useState(initialBook);
   const [alias, setAlias] = useState(device.info?.hostname || device.rustdesk_id);
@@ -1176,7 +1179,7 @@ function AddDiscoveredModal({ device, books, defaultBook, onClose, onSaved }: {
 
   const save = async () => {
     if (busy) return;
-    if (!bookId) { setError('Choose an address book.'); return; }
+    if (!bookId) { setError(t('dev.chooseBook')); return; }
     setBusy(true);
     setError('');
     try {
@@ -1196,14 +1199,14 @@ function AddDiscoveredModal({ device, books, defaultBook, onClose, onSaved }: {
 
   return (
     <Modal
-      title="Add discovered device"
-      subtitle="The device stays in the discovered registry; a copy is added to the selected book."
+      title={t('dev.addDiscoveredTitle')}
+      subtitle={t('dev.addDiscoveredSubtitle')}
       onClose={onClose}
       footer={
         <>
-          <button className={btnGhost} onClick={onClose} disabled={busy}>Cancel</button>
+          <button className={btnGhost} onClick={onClose} disabled={busy}>{t('common.cancel')}</button>
           <button className={btn} onClick={() => { void save(); }} disabled={busy || books.length === 0}>
-            {busy ? 'Adding…' : 'Add to book'}
+            {busy ? t('dev.adding') : t('dev.addToBook')}
           </button>
         </>
       }
@@ -1213,50 +1216,50 @@ function AddDiscoveredModal({ device, books, defaultBook, onClose, onSaved }: {
         <div className="font-mono text-xs text-slate-500 dark:text-slate-400">{device.rustdesk_id}</div>
         <div className="text-xs text-slate-500 dark:text-slate-400">
           {[device.info?.os_name, device.info?.version ? `v${device.info.version}` : '', device.last_ip]
-            .filter(Boolean).join(' · ') || 'No system report'}
+            .filter(Boolean).join(' · ') || t('dev.freshNo')}
         </div>
       </div>
 
       {error && <p className="mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">{error}</p>}
       {books.length === 0 && (
         <p className="mb-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
-          You do not have write access to any address book.
+          {t('dev.noWriteAccess')}
         </p>
       )}
 
       <div className="space-y-3">
         <label className="block text-sm">
-          Address book
-          <select aria-label="Address book" value={bookId} onChange={(e) => setBookId(e.target.value)} className={`${input} mt-1`}>
+          {t('dev.selectBook')}
+          <select aria-label={t('dev.selectBook')} value={bookId} onChange={(e) => setBookId(e.target.value)} className={`${input} mt-1`}>
             {books.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
           </select>
         </label>
         <label className="block text-sm">
-          Alias
+          {t('dev.alias')}
           <input value={alias} onChange={(e) => setAlias(e.target.value)} className={`${input} mt-1`} />
         </label>
         <div className="text-sm">
-          Tags
+          {t('dev.tags')}
           <div className="mt-1 max-h-36 overflow-y-auto rounded border border-slate-200 p-2 dark:border-slate-700">
-            {bookTags.map((t) => (
-              <label key={t.id} className="flex items-center gap-2 py-0.5 text-sm">
+            {bookTags.map((tag) => (
+              <label key={tag.id} className="flex items-center gap-2 py-0.5 text-sm">
                 <Checkbox
-                  checked={picked.includes(t.name)}
-                  onChange={() => togglePick(t.name)}
-                  label={`Tag ${t.name}`}
+                  checked={picked.includes(tag.name)}
+                  onChange={() => togglePick(tag.name)}
+                  label={t('dev.tag', { name: tag.name })}
                 />
-                <TagBadge name={t.name} color={t.color} />
+                <TagBadge name={tag.name} color={tag.color} />
               </label>
             ))}
             {!tagsLoading && bookTags.length === 0 && (
-              <span className="text-xs text-slate-400">No tags in this book yet</span>
+              <span className="text-xs text-slate-500 dark:text-slate-400">{t('dev.noTagsBook')}</span>
             )}
-            {tagsLoading && <span className="text-xs text-slate-400">Loading tags…</span>}
+            {tagsLoading && <span className="text-xs text-slate-500 dark:text-slate-400">{t('dev.loadingTags')}</span>}
           </div>
           <input
             value={typed}
             onChange={(e) => setTyped(e.target.value)}
-            placeholder="New tags, comma separated"
+            placeholder={t('dev.newTagsPlaceholder')}
             className={`${input} mt-2`}
           />
           {tagNames.length > 0 && (
@@ -1266,7 +1269,7 @@ function AddDiscoveredModal({ device, books, defaultBook, onClose, onSaved }: {
           )}
         </div>
         <label className="block text-sm">
-          Note
+          {t('dev.note')}
           <textarea value={note} onChange={(e) => setNote(e.target.value)} className={`${input} mt-1`} rows={2} />
         </label>
       </div>
@@ -1280,6 +1283,7 @@ function BulkTagModal({ count, tags, onClose, onApply }: {
   onClose: () => void;
   onApply: (add: string[], remove: string[]) => Promise<void>;
 }) {
+  const { t } = useI18n();
   const [add, setAdd] = useState<string[]>([]);
   const [remove, setRemove] = useState<string[]>([]);
   const [typed, setTyped] = useState('');
@@ -1301,12 +1305,12 @@ function BulkTagModal({ count, tags, onClose, onApply }: {
   const apply = async () => {
     if (busy) return;
     if (finalAdd.length === 0 && remove.length === 0) {
-      setError('Select or type at least one tag.');
+      setError(t('dev.selectOneTag'));
       return;
     }
     const overlap = finalAdd.filter((name) => remove.includes(name));
     if (overlap.length > 0) {
-      setError(`Tag "${overlap[0]}" is selected for both adding and removing.`);
+      setError(t('dev.tagOverlap', { name: overlap[0] }));
       return;
     }
     setBusy(true);
@@ -1323,15 +1327,15 @@ function BulkTagModal({ count, tags, onClose, onApply }: {
 
   return (
     <Modal
-      title="Add or remove tags"
-      subtitle={`${count} selected device${count === 1 ? '' : 's'}. Existing tags are preserved; only the checked tags change.`}
+      title={t('dev.bulkTagsTitle')}
+      subtitle={t('dev.bulkTagsSubtitle', { n: count })}
       onClose={onClose}
       size="lg"
       footer={
         <>
-          <button className={btnGhost} onClick={onClose} disabled={busy}>Cancel</button>
+          <button className={btnGhost} onClick={onClose} disabled={busy}>{t('common.cancel')}</button>
           <button className={btn} onClick={() => { void apply(); }} disabled={busy}>
-            {busy ? 'Applying…' : 'Apply'}
+            {busy ? t('dev.applying') : t('dev.apply')}
           </button>
         </>
       }
@@ -1339,20 +1343,20 @@ function BulkTagModal({ count, tags, onClose, onApply }: {
       {error && <p className="mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">{error}</p>}
       <div className="grid gap-4 sm:grid-cols-2">
         <div>
-          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-green-700 dark:text-green-400">Add tags</h3>
+          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-green-700 dark:text-green-400">{t('dev.addTags')}</h3>
           <div className="max-h-40 overflow-y-auto rounded border border-slate-200 p-2 dark:border-slate-700">
-            {tags.map((t) => (
-              <label key={t.id} className="flex items-center gap-2 py-0.5 text-sm">
-                <Checkbox checked={add.includes(t.name)} onChange={() => toggleAdd(t.name)} label={`Add ${t.name}`} />
-                <TagBadge name={t.name} color={t.color} />
+            {tags.map((tag) => (
+              <label key={tag.id} className="flex items-center gap-2 py-0.5 text-sm">
+                <Checkbox checked={add.includes(tag.name)} onChange={() => toggleAdd(tag.name)} label={t('dev.addTag', { name: tag.name })} />
+                <TagBadge name={tag.name} color={tag.color} />
               </label>
             ))}
-            {tags.length === 0 && <span className="text-xs text-slate-400">No tags in this book yet</span>}
+            {tags.length === 0 && <span className="text-xs text-slate-500 dark:text-slate-400">{t('dev.noTagsBook')}</span>}
           </div>
           <input
             value={typed}
             onChange={(e) => setTyped(e.target.value)}
-            placeholder="New tags, comma separated"
+            placeholder={t('dev.newTagsPlaceholder')}
             className={`${input} mt-2`}
           />
           {typedNames.length > 0 && (
@@ -1362,22 +1366,22 @@ function BulkTagModal({ count, tags, onClose, onApply }: {
           )}
         </div>
         <div>
-          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-red-700 dark:text-red-400">Remove tags</h3>
+          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-red-700 dark:text-red-400">{t('dev.removeTags')}</h3>
           <div className="max-h-40 overflow-y-auto rounded border border-slate-200 p-2 dark:border-slate-700">
-            {tags.map((t) => (
-              <label key={t.id} className="flex items-center gap-2 py-0.5 text-sm">
-                <Checkbox checked={remove.includes(t.name)} onChange={() => toggleRemove(t.name)} label={`Remove ${t.name}`} />
-                <TagBadge name={t.name} color={t.color} />
+            {tags.map((tag) => (
+              <label key={tag.id} className="flex items-center gap-2 py-0.5 text-sm">
+                <Checkbox checked={remove.includes(tag.name)} onChange={() => toggleRemove(tag.name)} label={t('dev.removeTag', { name: tag.name })} />
+                <TagBadge name={tag.name} color={tag.color} />
               </label>
             ))}
-            {tags.length === 0 && <span className="text-xs text-slate-400">No tags in this book yet</span>}
+            {tags.length === 0 && <span className="text-xs text-slate-500 dark:text-slate-400">{t('dev.noTagsBook')}</span>}
           </div>
           <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
-            A tag is only detached from the selected devices; the tag itself is not deleted.
+            {t('dev.tagDetachNote')}
           </p>
         </div>
       </div>
-      <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">Up to 20 tags per operation.</p>
+      <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">{t('dev.upTo20')}</p>
     </Modal>
   );
 }
@@ -1391,6 +1395,7 @@ function DeviceForm({ book, initial, tags, tagsReady = true, onClose, onSaved, o
   onSaved: (m: string) => void;
   onError: (m: string) => void;
 }) {
+  const { t } = useI18n();
   const [rid, setRid] = useState(initial?.rustdesk_id || '');
   const [alias, setAlias] = useState(initial?.alias || '');
   const [note, setNote] = useState(initial?.note || '');
@@ -1399,14 +1404,14 @@ function DeviceForm({ book, initial, tags, tagsReady = true, onClose, onSaved, o
   const [busy, setBusy] = useState(false);
 
   const save = async () => {
-    if (!rid.trim()) { onError('RustDesk ID required'); return; }
-    if (!tagsReady) { onError('Tags are still loading; try again in a moment.'); return; }
+    if (!rid.trim()) { onError(t('dev.rustdeskIdRequired')); return; }
+    if (!tagsReady) { onError(t('dev.tagsStillLoading')); return; }
     setBusy(true);
     try {
       const body = { rustdesk_id: rid.trim(), alias, note, tags: sel, password: pw };
       if (initial) await api.updateEntry(initial.id, body);
       else await api.createEntry(book, body);
-      onSaved(initial ? 'Device updated' : 'Device created');
+      onSaved(initial ? t('dev.deviceUpdated') : t('dev.deviceCreated'));
     } catch (e) {
       onError(String((e as Error).message));
     } finally {
@@ -1417,55 +1422,55 @@ function DeviceForm({ book, initial, tags, tagsReady = true, onClose, onSaved, o
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose} role="presentation">
       <div
-        className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-lg bg-white p-5 shadow-xl dark:bg-slate-900"
+        className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-lg bg-white p-5 text-slate-900 shadow-xl dark:bg-slate-900 dark:text-slate-100"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
-        aria-label={initial ? 'Edit device' : 'Add device'}
+        aria-label={initial ? t('dev.editDevice') : t('dev.addDevice')}
       >
         <div className="mb-4 flex items-start justify-between gap-2">
-          <h2 className="text-lg font-bold">{initial ? 'Edit device' : 'Add device'}</h2>
-          <button onClick={onClose} aria-label="Close" className="rounded border border-slate-200 px-2 py-0.5 text-sm text-slate-500 dark:text-slate-400 dark:border-slate-700">✕</button>
+          <h2 className="text-lg font-bold">{initial ? t('dev.editDevice') : t('dev.addDevice')}</h2>
+          <button onClick={onClose} aria-label={t('common.close')} className="rounded border border-slate-200 px-2 py-0.5 text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400">✕</button>
         </div>
         <div className="space-y-3">
           <label className="block text-sm">
-            RustDesk ID
+            {t('dev.rustdeskId')}
             <input value={rid} onChange={(e) => setRid(e.target.value)} className={`${input} mt-1`} />
           </label>
           <label className="block text-sm">
-            Alias
+            {t('dev.alias')}
             <input value={alias} onChange={(e) => setAlias(e.target.value)} className={`${input} mt-1`} />
           </label>
           <div className="text-sm">
-            Tags
+            {t('dev.tags')}
             <div className="mt-1 max-h-32 overflow-y-auto rounded border border-slate-200 p-2 dark:border-slate-700">
-              {tags.map((t) => (
-                <label key={t.id} className="flex items-center gap-2 py-0.5 text-sm">
+              {tags.map((tag) => (
+                <label key={tag.id} className="flex items-center gap-2 py-0.5 text-sm">
                   <Checkbox
-                    checked={sel.includes(t.name)}
-                    onChange={() => setSel((list) => (list.includes(t.name) ? list.filter((x) => x !== t.name) : [...list, t.name]))}
-                    label={`Tag ${t.name}`}
+                    checked={sel.includes(tag.name)}
+                    onChange={() => setSel((list) => (list.includes(tag.name) ? list.filter((x) => x !== tag.name) : [...list, tag.name]))}
+                    label={t('dev.tag', { name: tag.name })}
                   />
-                  <TagBadge name={t.name} color={t.color} />
+                  <TagBadge name={tag.name} color={tag.color} />
                 </label>
               ))}
-              {tagsReady && tags.length === 0 && <span className="text-slate-400">No tags in this book</span>}
-              {!tagsReady && <span className="text-slate-400">Loading tags…</span>}
+              {tagsReady && tags.length === 0 && <span className="text-slate-500 dark:text-slate-400">{t('dev.noTagsBookShort')}</span>}
+              {!tagsReady && <span className="text-slate-500 dark:text-slate-400">{t('dev.loadingTags')}</span>}
             </div>
           </div>
           <label className="block text-sm">
-            Note
+            {t('dev.note')}
             <textarea value={note} onChange={(e) => setNote(e.target.value)} className={`${input} mt-1`} rows={2} />
           </label>
           <label className="block text-sm">
-            Password {initial && '(leave empty to keep)'}
+            {t('common.password')} {initial && t('dev.passwordKeep')}
             <input type="password" value={pw} onChange={(e) => setPw(e.target.value)} className={`${input} mt-1`} />
           </label>
         </div>
         <div className="mt-5 flex justify-end gap-2">
-          <button onClick={onClose} className={btnGhost}>Cancel</button>
+          <button onClick={onClose} className={btnGhost}>{t('common.cancel')}</button>
           <button onClick={() => { void save(); }} disabled={busy || !tagsReady} className={btn}>
-            {busy ? 'Saving…' : 'Save'}
+            {busy ? t('common.saving') : t('common.save')}
           </button>
         </div>
       </div>

@@ -50,11 +50,14 @@
 | `password_hash` | String(255) | NOT NULL | bcrypt |
 | `is_admin` | Boolean | NOT NULL, default `0` | доступ к shared-книгам и `/api/v1/users` |
 | `is_disabled` | Boolean | NOT NULL, default `0` | блокирует login, Bearer и panel |
-| `display_name` | String(128) | NOT NULL, default `""` | отображаемое имя |
+| `display_name` | String(128) | NOT NULL, default `""` | отображаемое имя; правится в панели (`/api/v1/me`, `/api/v1/users`) |
 | `created_at` | DateTime | NOT NULL | naive UTC |
 
 Связи: `sessions`, `books` (каскадное удаление). При создании пользователя
-`create_user()` сразу создаёт личную книгу.
+`create_user()` сразу создаёт личную книгу. `display_name` нормализуется
+(`clean_display_name`: trim + схлопывание пробелов) и отдаётся клиенту в
+`/api/login`/`/api/currentUser`; RustDesk использует его как `my_name` при
+подключении к другому ПК (см. `DECISIONS.md` DEC-015).
 
 ### 3.2. `sessions`
 

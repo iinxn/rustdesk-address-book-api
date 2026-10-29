@@ -1,3 +1,6 @@
+import { translate } from './i18n';
+import type { Lang } from './i18n';
+
 export type Presence = 'online' | 'offline' | 'unknown';
 
 export interface TagObj {
@@ -120,6 +123,7 @@ export interface Book {
 export interface PanelUser {
   id: string;
   username: string;
+  display_name: string;
   is_admin: boolean;
   is_disabled: boolean;
 }
@@ -170,16 +174,16 @@ export function parseUtc(iso: string): Date {
   return new Date(hasZone ? normalized : `${normalized}Z`);
 }
 
-export function relTime(iso: string | null): string {
-  if (!iso) return 'Unknown';
+export function relTime(iso: string | null, lang: Lang): string {
+  if (!iso) return translate(lang, 'time.unknown');
   const s = Math.floor((Date.now() - parseUtc(iso).getTime()) / 1000);
-  if (s < 0) return 'just now';
-  if (s < 60) return 'just now';
+  if (s < 0) return translate(lang, 'time.justNow');
+  if (s < 60) return translate(lang, 'time.justNow');
   const m = Math.floor(s / 60);
-  if (m < 60) return `${m} min ago`;
+  if (m < 60) return translate(lang, 'time.minAgo', { n: m });
   const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
+  if (h < 24) return translate(lang, 'time.hoursAgo', { n: h });
   const d = Math.floor(h / 24);
-  if (d === 1) return 'yesterday';
-  return `${d} days ago`;
+  if (d === 1) return translate(lang, 'time.yesterday');
+  return translate(lang, 'time.daysAgo', { n: d });
 }

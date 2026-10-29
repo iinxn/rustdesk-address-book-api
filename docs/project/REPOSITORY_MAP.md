@@ -65,7 +65,7 @@
 | Файл | Ответственность | Основные функции |
 |---|---|---|
 | `ab.py` | книги, права, peers, теги | `personal_book`, `get_book_for_user`, `rule_for`, `can_write`, `shared_profiles`, `peer_out`, `sync_entry_tags`, `add_entry_tags`, `remove_entry_tags`, `apply_peer_update`, `tag_usage` |
-| `auth.py` | пользователи и opaque-сессии | `create_user` (создаёт личную книгу), `authenticate`, `create_session`, `destroy_user_sessions`, `purge_expired_sessions`, `user_by_token`, `destroy_session` |
+| `auth.py` | пользователи и opaque-сессии | `create_user` (создаёт личную книгу, принимает `display_name`), `clean_display_name`, `authenticate`, `create_session`, `destroy_user_sessions`, `purge_expired_sessions`, `user_by_token`, `destroy_session` |
 | `presence.py` | presence по heartbeat | `record_heartbeat`, `status_of`; `HEARTBEAT_SEC=15`, `ONLINE_AFTER_SEC=45` |
 | `device_info.py` | sysinfo (write-once), refresh/approval | `save_sysinfo`, `device_known`, `missing_fields`, `parse_cpu`, `parse_memory`, `parse_os`, `record_heartbeat`, `request_refresh`, `take_refresh`, `take_approval`, `info_out` |
 | `discovery.py` | drain очереди → БД | `reset_online`, `drain_once` (upsert, merge source, stale sweep) |
@@ -110,14 +110,16 @@
 | Файл | Назначение |
 |---|---|
 | `frontend/src/api.ts` | `req()`, `ApiError`, хранение токена в `localStorage`, все вызовы `/api/v1` и `/api/login` |
-| `frontend/src/types.ts` | контрактные типы, `parseUtc`, `relTime`, `colorCss`, `textOnColor` |
-| `frontend/src/App.tsx` | HashRouter, Guard по наличию токена, маршруты |
-| `frontend/src/components.tsx` | Layout, навигация, Brand, Badge, TagBadge, Modal, Confirm, Pagination, Toasts |
-| `frontend/src/hooks.ts` | `useDebounce`, `useTheme`, `useToasts` |
+| `frontend/src/types.ts` | контрактные типы, `parseUtc`, `relTime(iso, lang)`, `colorCss`, `textOnColor` |
+| `frontend/src/App.tsx` | провайдеры i18n и уведомлений, HashRouter, Guard по наличию токена, маршруты |
+| `frontend/src/i18n.tsx` | словари RU/EN, `I18nProvider`, `useI18n()`, `translate()`; выбор языка в `localStorage` |
+| `frontend/src/notifications.tsx` | `NotificationProvider`, `useNotify()`, глобальный хост тостов сверху |
+| `frontend/src/components.tsx` | Layout, навигация, Brand, LangSwitch, ProfileDialog (свой display name), Badge, TagBadge, Modal, Confirm, Pagination |
+| `frontend/src/hooks.ts` | `useDebounce`, `useTheme` (светлая тема по умолчанию) |
 | `frontend/src/pages/Devices.tsx` | основной экран: книги, поиск/фильтры, presence, discovered, bulk, карточка устройства, sysinfo |
 | `frontend/src/pages/Books.tsx` | список/создание/переименование/удаление книг |
 | `frontend/src/pages/Tags.tsx` | теги, цвета, переименование, удаление |
-| `frontend/src/pages/Users.tsx` | администрирование пользователей |
+| `frontend/src/pages/Users.tsx` | администрирование пользователей, display name |
 | `frontend/src/pages/Login.tsx` | вход, сохранение сессии, брендинг |
 | `frontend/vite.config.ts` | `base: '/app/'`, dev-proxy `/api` → `127.0.0.1:8000` |
 

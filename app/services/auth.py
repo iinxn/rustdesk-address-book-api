@@ -8,9 +8,33 @@ from app.core.config import settings
 from app.core.security import hash_password, new_token, verify_password
 from app.models.models import AddressBook, Session as SessionModel, User
 
+DISPLAY_NAME_MAX = 128
 
-def create_user(db: Session, username: str, password: str, is_admin: bool = False) -> User:
-    user = User(username=username, password_hash=hash_password(password), is_admin=is_admin)
+
+def clean_display_name(raw: str | None) -> str:
+    """Trim and collapse whitespace in a user-visible name.
+
+    The RustDesk client sends this value to the peer as `my_name`, so it must
+    stay a single bounded line (see DECISIONS.md DEC-015). Callers validate
+    `len(clean_display_name(x)) <= DISPLAY_NAME_MAX`; the DB column is
+    String(128) and SQLite does not enforce it.
+    """
+    return " ".join((raw or "").split())
+
+
+def create_user(
+    db: Session,
+    username: str,
+    password: str,
+    is_admin: bool = False,
+    display_name: str = "",
+) -> User:
+    user = User(
+        username=username,
+        password_hash=hash_password(password),
+        is_admin=is_admin,
+        display_name=clean_display_name(display_name),
+    )
     db.add(user)
     db.flush()
     # every user gets a personal address book (guid = book id)

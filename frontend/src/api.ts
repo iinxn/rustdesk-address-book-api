@@ -1,16 +1,23 @@
 const KEY = 'ab_token';
 const USER = 'ab_user';
 
+export type SessionUser = { username: string; displayName?: string; isAdmin: boolean };
+
 export const getToken = () => localStorage.getItem(KEY) || '';
-export const setSession = (token: string, username: string, isAdmin: boolean) => {
+export const setSession = (token: string, username: string, isAdmin: boolean, displayName = '') => {
   localStorage.setItem(KEY, token);
-  localStorage.setItem(USER, JSON.stringify({ username, isAdmin }));
+  localStorage.setItem(USER, JSON.stringify({ username, displayName, isAdmin }));
+};
+/** Update only the cached display name after the profile dialog saves it. */
+export const setDisplayName = (displayName: string) => {
+  const u = sessionUser();
+  if (u) localStorage.setItem(USER, JSON.stringify({ ...u, displayName }));
 };
 export const clearSession = () => {
   localStorage.removeItem(KEY);
   localStorage.removeItem(USER);
 };
-export const sessionUser = (): { username: string; isAdmin: boolean } | null => {
+export const sessionUser = (): SessionUser | null => {
   try {
     return JSON.parse(localStorage.getItem(USER) || 'null');
   } catch {
@@ -53,11 +60,15 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
 
 export const api = {
   login: (username: string, password: string) =>
-    req<{ access_token: string; user: { name: string; is_admin: boolean } }>('POST', '/api/login', {
-      username,
-      password,
-      type: 'account',
-    }),
+    req<{ access_token: string; user: { name: string; display_name: string; is_admin: boolean } }>(
+      'POST',
+      '/api/login',
+      {
+        username,
+        password,
+        type: 'account',
+      },
+    ),
   stats: () => req<import('./types').Stats>('GET', '/api/v1/stats'),
   books: () => req<import('./types').Book[]>('GET', '/api/v1/address-books'),
   createBook: (name: string) => req<unknown>('POST', '/api/v1/address-books', { name }),
@@ -102,4 +113,7 @@ export const api = {
   createUser: (b: unknown) => req<unknown>('POST', '/api/v1/users', b),
   updateUser: (id: string, b: unknown) => req<unknown>('PUT', `/api/v1/users/${id}`, b),
   deleteUser: (id: string) => req<{ ok: boolean }>('DELETE', `/api/v1/users/${id}`),
+  me: () => req<import('./types').PanelUser>('GET', '/api/v1/me'),
+  updateMe: (displayName: string) =>
+    req<import('./types').PanelUser>('PUT', '/api/v1/me', { display_name: displayName }),
 };
