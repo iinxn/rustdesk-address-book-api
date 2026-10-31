@@ -5,7 +5,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.middleware.sessions import SessionMiddleware
 
 from app.api import panel, rustdesk, webapi
 from app.api.panel import _LoginRedirect
@@ -14,6 +13,7 @@ from app.core.config import settings
 from app.core.middleware import (
     AuditMiddleware,
     BodyCapMiddleware,
+    PanelSessionMiddleware,
     RateLimitMiddleware,
     rate_limit_rules,
 )
@@ -86,7 +86,9 @@ async def lifespan(app: FastAPI):
             listen=settings.shim_listen, upstream=settings.shim_upstream,
             id_key=settings.shim_id_key, max_conns=settings.shim_max_conns,
             per_ip_per_min=settings.shim_per_ip_per_min,
-            diag_msgtypes=settings.shim_diag_msgtypes == "1")
+            diag_msgtypes=settings.shim_diag_msgtypes == "1",
+            udp_max_sessions=settings.shim_udp_max_sessions,
+            udp_per_ip_per_min=settings.shim_udp_per_ip_per_min)
         supervisor.start()
 
         async def _watch():
@@ -141,8 +143,11 @@ app = FastAPI(
 )
 app.add_middleware(BodyCapMiddleware)
 app.add_middleware(RateLimitMiddleware, rules=rate_limit_rules())
-app.add_middleware(SessionMiddleware, secret_key=settings.web_secret,
-                   same_site="lax", https_only=False)
+# Panel cookie: HttpOnly, SameSite=Lax, Secure on HTTPS (SESSION_COOKIE_SECURE).
+# It only carries the id of a server-side `sessions` row (see api/panel.py).
+app.add_middleware(PanelSessionMiddleware, secret_key=settings.web_secret,
+                   mode=settings.session_cookie_secure, same_site="lax",
+                   max_age=(settings.session_days or 14) * 24 * 3600)
 # Outermost: it assigns the request id and sees rate-limit/body-cap responses.
 app.add_middleware(AuditMiddleware)
 app.include_router(rustdesk.router)

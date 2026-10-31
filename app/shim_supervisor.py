@@ -15,13 +15,16 @@ BACKOFFS = (1, 2, 4, 8, 16, 30, 60)
 
 class ShimSupervisor:
     def __init__(self, listen: str, upstream: str, id_key: str,
-                 max_conns: int, per_ip_per_min: int, diag_msgtypes: bool = False):
+                 max_conns: int, per_ip_per_min: int, diag_msgtypes: bool = False,
+                 udp_max_sessions: int = 2048, udp_per_ip_per_min: int = 600):
         self.listen = listen
         self.upstream = upstream
         self.id_key = id_key
         self.max_conns = max_conns
         self.per_ip_per_min = per_ip_per_min
         self.diag_msgtypes = diag_msgtypes
+        self.udp_max_sessions = udp_max_sessions
+        self.udp_per_ip_per_min = udp_per_ip_per_min
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._fail_times: list[float] = []
@@ -48,9 +51,12 @@ class ShimSupervisor:
         try:
             sign_sk = shim_mod.load_sign_sk(self.id_key)
             gate = shim_mod.Gate(self.max_conns, self.per_ip_per_min)
+            # UDP gets its own budget: ~800 devices are ~800 live sessions.
+            udp_gate = shim_mod.Gate(self.udp_max_sessions, self.udp_per_ip_per_min)
+            shim_mod.raise_fd_limit(self.udp_max_sessions, self.max_conns)
 
             async def _run():
-                relay = shim_mod.UdpRelay((uh, int(up)), gate)
+                relay = shim_mod.UdpRelay((uh, int(up)), udp_gate)
                 await relay.start(host, int(port))
                 srv = await asyncio.start_server(
                     lambda r, w: shim_mod.handle(

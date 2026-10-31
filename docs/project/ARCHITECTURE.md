@@ -101,8 +101,8 @@ flowchart LR
 ```text
 Uvicorn
   → AuditMiddleware (X-Request-ID, context, значимые access/security-события)
-  → SessionMiddleware (cookie, WEB_SECRET, SameSite=Lax, https_only=False)
-  → RateLimitMiddleware (per-IP для login/sysinfo; per-device + aggregate per-IP для heartbeat)
+  → PanelSessionMiddleware (cookie, WEB_SECRET, SameSite=Lax, Secure на HTTPS)
+  → RateLimitMiddleware (per-IP для /api/login, /panel/login, sysinfo; per-device + aggregate per-IP для heartbeat)
   → BodyCapMiddleware (Content-Length > MAX_BODY_BYTES → 413)
   → router (rustdesk → webapi → panel)
   → dependency get_db() (SQLAlchemy Session на запрос; heartbeat и sysinfo — своя сессия в threadpool)
@@ -179,15 +179,23 @@ sequenceDiagram
     A->>DB: destroy_session(token)
 ```
 
-- Пароли: bcrypt (`app/core/security.py`).
+- Пароли: bcrypt (`app/core/security.py`). Проверка идёт в отдельном пуле
+  `auth._hash_pool` (`PASSWORD_HASH_WORKERS`); `/api/login` её ожидает
+  (`authenticate_async`), а запись сессии и аудита уходит в threadpool —
+  event loop не блокируется. Сверх `PASSWORD_HASH_QUEUE` проверок в полёте —
+  `AuthBusy` → `429`.
+- Политика пароля при создании/смене — `password_error()`: непустой,
+  ≤72 байт.
 - Токен opaque, хранится в `sessions.token`; `SESSION_DAYS=30` по умолчанию,
   `0` = без срока.
 - `user_by_token()` удаляет просроченный токен при обращении; `create_session()`
   вызывает `purge_expired_sessions()`.
 - Disable пользователя и смена пароля через `/api/v1/users/{uid}` вызывают
   `destroy_user_sessions()` — все Bearer-сессии отзываются.
-- Legacy-панель хранит `uid` в подписанной cookie; `panel_user()` проверяет
-  `is_disabled` и очищает cookie.
+- Legacy-панель при входе создаёт строку `sessions` и кладёт в подписанную
+  cookie только её `id` (`sid`); `panel_user()` проверяет строку, срок и
+  `is_disabled`. Logout удаляет строку; `destroy_user_sessions()` отзывает и
+  cookie-сессии.
 - SPA хранит токен в `localStorage` (`ab_token`) — это важно для XSS-модели;
   см. `docs/SECURITY.md`.
 
@@ -393,9 +401,17 @@ flowchart LR
 
 - UDP-путь протокола не имеет шифрования; это plain forwarder.
 - На каждый адрес клиента — свой upstream-сокет, чтобы ответы не путались.
-- `UDP_IDLE_TIMEOUT=120s`, sweeper каждые 30 с; лимит сессий — тот же
-  `SHIM_MAX_CONNS`; rate limit применяется только к созданию сессии, чтобы
-  keepalive не упирался в лимит.
+- `UDP_IDLE_TIMEOUT=120s`, sweeper каждые 30 с. Свой бюджет, отдельный от
+  TCP: `SHIM_UDP_MAX_SESSIONS` (2048) и `SHIM_UDP_PER_IP_PER_MIN` (600 новых
+  сессий/мин на IP — 800 устройств за одним NAT регистрируются за ~1,5 мин).
+  Rate limit — только на создание сессии, keepalive его не расходует.
+- Сессия, приславшая одну датаграмму, «неподтверждённая»: живой клиент
+  повторяет RegisterPeer каждые ~12 с. Неподтверждённые удаляются через
+  `UDP_UNCONFIRMED_TIMEOUT=30s` и вытесняются первыми при полной таблице;
+  подтверждённые не вытесняются.
+- На каждую сессию — сокет: при старте шим поднимает `RLIMIT_NOFILE` до
+  нужного (в пределах hard limit) и предупреждает, если не хватает.
+- Отказы (rate/full/evicted) логируются сводкой раз в минуту.
 - Datagram > 65507 отбрасывается; ошибки логируются, relay продолжает работу.
 
 ## 10. Супервизор и отказы

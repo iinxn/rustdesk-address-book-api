@@ -564,6 +564,15 @@ async def _handle(conn_r, conn_w, upstream, sign_sk: bytes, peer, diag: bool = F
 UDP_IDLE_TIMEOUT = 120.0
 UDP_SWEEP_INTERVAL = 30.0
 UDP_MAX_DATAGRAM = 65507
+# A real client re-registers every ~12 s from the same socket, so a session
+# that has sent a single datagram for this long is not a live client (often a
+# spoofed source). Such "unconfirmed" sessions are swept early and are the
+# first to be evicted when the table is full, so one-shot floods cannot lock
+# registered devices out.
+UDP_UNCONFIRMED_TIMEOUT = 30.0
+UDP_MAX_SESSIONS = 2048
+UDP_NEW_PER_IP_PER_MIN = 600
+UDP_LOG_EVERY = 60.0
 
 
 class _UpstreamProto(asyncio.DatagramProtocol):
@@ -587,13 +596,45 @@ class _UpstreamProto(asyncio.DatagramProtocol):
 
 
 class UdpRelay:
+    """NAT-style UDP relay with its own budget (independent of TCP `Gate`).
+
+    `gate` limits *new* sessions per source IP and `gate.max_conns` is the
+    session-table size. Sessions that have sent only one datagram are kept in
+    `unconfirmed` (insertion order = age) for early sweep and eviction.
+    """
+
     def __init__(self, upstream: tuple[str, int], gate: Gate):
         self.upstream = upstream
         self.gate = gate
         self.transport: asyncio.DatagramTransport | None = None
         self.sessions: dict[tuple, dict] = {}
+        self.unconfirmed: dict[tuple, float] = {}
         self._tasks: set[asyncio.Task] = set()
         self._closed = False
+        self._drops = {"rate": 0, "full": 0, "evicted": 0}
+        self._drops_logged_at = 0.0
+
+    def _note_drop(self, kind: str) -> None:
+        """Count drops; one summary line per UDP_LOG_EVERY instead of per packet."""
+        self._drops[kind] += 1
+        now = time.monotonic()
+        if now - self._drops_logged_at >= UDP_LOG_EVERY:
+            self._drops_logged_at = now
+            log.warning("udp relay pressure: sessions=%d/%d rate_limited=%d full=%d evicted=%d",
+                        len(self.sessions), self.gate.max_conns, self._drops["rate"],
+                        self._drops["full"], self._drops["evicted"])
+            self._drops = {"rate": 0, "full": 0, "evicted": 0}
+
+    def _make_room(self) -> bool:
+        """Free one slot for a new session: evict the oldest unconfirmed one."""
+        if len(self.sessions) < self.gate.max_conns:
+            return True
+        if not self.unconfirmed:
+            return False
+        oldest = next(iter(self.unconfirmed))
+        self._drop(oldest)
+        self._note_drop("evicted")
+        return True
 
     def _spawn(self, coro) -> asyncio.Task:
         # SEC-015: forget finished tasks instead of leaking them for the
@@ -628,18 +669,22 @@ class UdpRelay:
         if sess is None:
             ip = addr[0]
             if not self.gate.admit(ip):
-                log.warning("%s: udp rate limited", ip)
+                self._note_drop("rate")
                 return
-            if len(self.sessions) >= self.gate.max_conns:
-                log.warning("udp relay full (%d), drop %s", len(self.sessions), ip)
+            if not self._make_room():
+                self._note_drop("full")
                 return
-            sess = {"queue": asyncio.Queue(), "last": time.monotonic(),
+            now = time.monotonic()
+            sess = {"queue": asyncio.Queue(), "last": now, "created": now,
                     "up": None, "pending": data}
             self.sessions[addr] = sess
+            self.unconfirmed[addr] = now
             self._spawn(self._responder(addr))
-            log.info("udp session opened for %s", ip)
+            log.debug("udp session opened for %s", ip)
             return
         sess["last"] = time.monotonic()
+        # Second datagram from the same socket: a live client, not a one-shot.
+        self.unconfirmed.pop(addr, None)
         up = sess["up"]
         if up is not None:
             up.sendto(data)
@@ -671,9 +716,18 @@ class UdpRelay:
         except (ConnectionError, OSError) as e:
             log.warning("udp upstream error for %s: %r", addr[0], e)
         finally:
-            self._drop(addr)
+            # The address may already belong to a newer session (evicted or
+            # idle-dropped, then the client spoke again): close only our own.
+            if self.sessions.get(addr) is sess:
+                self._drop(addr)
+            elif sess.get("up") is not None:
+                try:
+                    sess["up"].close()
+                except Exception:
+                    pass
 
     def _drop(self, addr):
+        self.unconfirmed.pop(addr, None)
         sess = self.sessions.pop(addr, None)
         if sess is None:
             return
@@ -687,19 +741,24 @@ class UdpRelay:
             sess["queue"].put_nowait(None)
         except asyncio.QueueFull:
             pass
-        log.info("udp session closed for %s", addr[0])
+        log.debug("udp session closed for %s", addr[0])
 
     async def _sweep(self):
         try:
             while not self._closed:
                 await asyncio.sleep(UDP_SWEEP_INTERVAL)
-                now = time.monotonic()
-                self.gate.sweep(now)  # SEC-014: guaranteed periodic purge
-                for addr, sess in list(self.sessions.items()):
-                    if now - sess["last"] > UDP_IDLE_TIMEOUT:
-                        self._drop(addr)
+                self.sweep_once(time.monotonic())
         except asyncio.CancelledError:
             pass
+
+    def sweep_once(self, now: float) -> None:
+        self.gate.sweep(now)  # SEC-014: guaranteed periodic purge
+        for addr, created in list(self.unconfirmed.items()):
+            if now - created > UDP_UNCONFIRMED_TIMEOUT:
+                self._drop(addr)
+        for addr, sess in list(self.sessions.items()):
+            if now - sess["last"] > UDP_IDLE_TIMEOUT:
+                self._drop(addr)
 
     async def aclose(self):
         self._closed = True
@@ -726,15 +785,41 @@ class _ListenProto(asyncio.DatagramProtocol):
         pass
 
 
+def raise_fd_limit(udp_sessions: int, tcp_conns: int) -> None:
+    """Each UDP session holds one upstream socket, each TCP proxy two sockets.
+
+    The default soft RLIMIT_NOFILE (often 1024) is below what ~800 devices
+    need; raise it up to the hard limit and warn when even that is too low.
+    """
+    try:
+        import resource
+    except ImportError:  # non-POSIX
+        return
+    need = udp_sessions + 2 * tcp_conns + 256
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft != resource.RLIM_INFINITY and soft < need:
+        target = need if hard == resource.RLIM_INFINITY else min(need, hard)
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+            soft = target
+        except (ValueError, OSError) as e:
+            log.warning("cannot raise RLIMIT_NOFILE to %d: %r", target, e)
+    if soft != resource.RLIM_INFINITY and soft < need:
+        log.warning("RLIMIT_NOFILE=%d is below the %d sockets the shim may need; "
+                    "raise LimitNOFILE / ulimit -n", soft, need)
+
+
 async def amain(args):
     host, port = args.listen.rsplit(":", 1)
     uh, up = args.upstream.rsplit(":", 1)
     sign_sk = load_sign_sk(args.id_key)
     gate = Gate(args.max_conns, args.per_ip_per_min)
+    udp_gate = Gate(args.udp_max_sessions, args.udp_per_ip_per_min)
+    raise_fd_limit(args.udp_max_sessions, args.max_conns)
     # A restarted shim has no live TCP connections from the previous run.
     _publish_discovery("reset", "*")
     log.info("signing with hbbs key (pub=%s…)", base64.b64encode(sign_sk[32:]).decode()[:12])
-    relay = UdpRelay((uh, int(up)), gate)
+    relay = UdpRelay((uh, int(up)), udp_gate)
     await relay.start(host, int(port))
     srv = await asyncio.start_server(
         lambda r, w: handle(r, w, (uh, int(up)), sign_sk, gate), host, int(port))
@@ -756,6 +841,8 @@ def build_parser():
     ap.add_argument("--id-key", default="")
     ap.add_argument("--max-conns", type=int, default=MAX_CONNS)
     ap.add_argument("--per-ip-per-min", type=int, default=MAX_CONNS_PER_MIN_PER_IP)
+    ap.add_argument("--udp-max-sessions", type=int, default=UDP_MAX_SESSIONS)
+    ap.add_argument("--udp-per-ip-per-min", type=int, default=UDP_NEW_PER_IP_PER_MIN)
     return ap
 
 

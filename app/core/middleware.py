@@ -152,6 +152,35 @@ def client_ip(request) -> str:
     return direct
 
 
+class PanelSessionMiddleware:
+    """Starlette SessionMiddleware with a per-request `Secure` cookie flag.
+
+    `SESSION_COOKIE_SECURE=auto` marks the cookie Secure whenever the request
+    scheme is https: a direct TLS listener, or a reverse proxy whose
+    X-Forwarded-Proto uvicorn accepted. "1" always sets it, "0" never (plain
+    HTTP panel inside a trusted VPN). Two inner instances instead of one
+    mutable flag, so concurrent requests cannot see each other's setting.
+    """
+
+    def __init__(self, app, secret_key: str, mode: str = "auto", **kwargs):
+        from starlette.middleware.sessions import SessionMiddleware
+
+        self.mode = mode if mode in ("auto", "1", "0") else "auto"
+        self.plain = SessionMiddleware(app, secret_key=secret_key, https_only=False, **kwargs)
+        self.secure = SessionMiddleware(app, secret_key=secret_key, https_only=True, **kwargs)
+
+    def _is_secure(self, scope) -> bool:
+        if self.mode == "1":
+            return True
+        if self.mode == "0":
+            return False
+        return scope.get("scheme") in ("https", "wss")
+
+    async def __call__(self, scope, receive, send):
+        inner = self.secure if self._is_secure(scope) else self.plain
+        await inner(scope, receive, send)
+
+
 class BodyCapMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         try:
@@ -212,8 +241,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
 def rate_limit_rules():
     # Heartbeat has its own per-device + aggregate-IP logic in dispatch().
+    # `/panel/login` is a second password entry point (legacy panel): it gets
+    # the same per-IP budget as `/api/login`, in its own bucket.
     return [
         ("/api/login", ("POST",), "login_per_minute_per_ip"),
+        ("/panel/login", ("POST",), "login_per_minute_per_ip"),
         ("/api/sysinfo", ("POST",), "sysinfo_per_minute_per_ip"),
     ]
 

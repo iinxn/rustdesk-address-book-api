@@ -5,22 +5,46 @@ from starlette.templating import Jinja2Templates
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
+from datetime import datetime
+
 from app.core.middleware import client_ip
+from app.core.security import password_error
 from app.db.session import get_db
 from app.models.models import AddressBook, AddressBookEntry, Tag, User
+from app.models.models import Session as SessionModel
 from app.services import ab as ab_svc
 from app.services import audit as audit_svc
-from app.services.auth import authenticate, create_user
+from app.services.auth import AuthBusy, authenticate, create_session, create_user
 
 router = APIRouter(prefix="/panel")
 templates = Jinja2Templates(directory="app/web/templates")
 
 
-def panel_user(request: Request, db: Session = Depends(get_db)) -> User | None:
-    uid = request.session.get("uid")
-    if not uid:
+def _panel_session(request: Request, db: Session) -> SessionModel | None:
+    """Server-side session behind the signed cookie.
+
+    The cookie carries only the id of a `sessions` row, never the user id or a
+    Bearer token. Revocation is therefore real: logout deletes the row, and a
+    password change / disable deletes every row of the user
+    (`destroy_user_sessions`), so a copied cookie stops working at once.
+    Cookies from before this change (`uid`) are not accepted: log in again.
+    """
+    sid = request.session.get("sid")
+    if not sid or not isinstance(sid, str):
         return None
-    u = db.get(User, uid)
+    s = db.get(SessionModel, sid)
+    if s is None:
+        return None
+    if s.expires_at is not None and s.expires_at < datetime.utcnow():
+        db.delete(s)
+        db.commit()
+        return None
+    return s
+
+
+def panel_user(request: Request, db: Session = Depends(get_db)) -> User | None:
+    s = _panel_session(request, db)
+    u = db.get(User, s.user_id) if s is not None else None
     # SEC-001: the cookie path must obey disable exactly like the Bearer path
     # (`user_by_token`). A disabled/deleted user loses panel access at once;
     # the signed cookie is cleared so the stale session does not linger.
@@ -48,7 +72,14 @@ def login_page(request: Request):
 
 @router.post("/login")
 def login_post(request: Request, username: str = Form(""), password: str = Form(""), db: Session = Depends(get_db)):
-    user = authenticate(db, username.strip(), password)
+    try:
+        user = authenticate(db, username.strip(), password)
+    except AuthBusy:
+        audit_svc.note_rate_limited("/panel/login", client_ip(request), 5, audit_it=True)
+        return templates.TemplateResponse(
+            request, "login.html", {"error": "Too many login attempts, retry later"},
+            status_code=429, headers={"Retry-After": "5"},
+        )
     if user is None:
         audit_svc.write_event(
             category="auth",
@@ -63,7 +94,9 @@ def login_post(request: Request, username: str = Form(""), password: str = Form(
             details={"username": username},
         )
         return templates.TemplateResponse(request, "login.html", {"error": "Invalid login"}, status_code=401)
-    request.session["uid"] = user.id
+    # Fresh cookie content on every login (no session fixation).
+    request.session.clear()
+    request.session["sid"] = create_session(db, user).id
     audit_svc.write_event(
         category="auth",
         event_type="auth.login",
@@ -81,6 +114,10 @@ def login_post(request: Request, username: str = Form(""), password: str = Form(
 @router.get("/logout")
 def logout(request: Request, db: Session = Depends(get_db)):
     user = panel_user(request, db)
+    s = _panel_session(request, db)
+    if s is not None:
+        db.delete(s)
+        db.commit()
     request.session.clear()
     if user is not None:
         audit_svc.write_event(
@@ -328,7 +365,7 @@ def panel_user_create(request: Request, username: str = Form(""), password: str 
     admin = require_login(request, db)
     if not admin.is_admin:
         return RedirectResponse("/panel/devices", status_code=303)
-    if username.strip() and password and db.scalar(select(User).where(User.username == username.strip())) is None:
+    if username.strip() and password_error(password) is None and db.scalar(select(User).where(User.username == username.strip())) is None:
         u = create_user(db, username.strip(), password, bool(is_admin), commit=False)
         audit_svc.record(
             db,

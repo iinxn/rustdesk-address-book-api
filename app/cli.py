@@ -16,8 +16,11 @@ def cmd_create_admin(args):
     from app.services.auth import DISPLAY_NAME_MAX, clean_display_name, create_user
     username = args.username or input("username: ").strip()
     password = getpass.getpass("password: ")
-    if not username or not password:
-        raise SystemExit("username/password required")
+    if not username:
+        raise SystemExit("username required")
+    from app.core.security import password_error
+    if (problem := password_error(password)) is not None:
+        raise SystemExit(problem)
     if len(clean_display_name(args.display_name)) > DISPLAY_NAME_MAX:
         raise SystemExit(f"display-name too long (max {DISPLAY_NAME_MAX})")
     db = SessionLocal()

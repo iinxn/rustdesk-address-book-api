@@ -19,7 +19,13 @@ from app.services import ab as ab_svc
 from app.services import audit as audit_svc
 from app.services import device_info as info_svc
 from app.services import presence as presence_svc
-from app.services.auth import authenticate, create_session, destroy_session, user_by_token
+from app.services.auth import (
+    AuthBusy,
+    authenticate_async,
+    create_session,
+    destroy_session,
+    user_by_token,
+)
 
 router = APIRouter()
 
@@ -36,9 +42,20 @@ def ok_empty() -> Response:
 
 @router.post("/api/login")
 async def login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
-    user = authenticate(db, body.username, body.password)
+    # bcrypt is awaited in its own small pool and SQLite writes go to the
+    # threadpool: a burst of failed logins must not freeze the event loop
+    # (heartbeats of every device are served by the same loop).
+    try:
+        user = await authenticate_async(db, body.username, body.password)
+    except AuthBusy:
+        await run_in_threadpool(
+            audit_svc.note_rate_limited, "/api/login", client_ip(request), 5, True
+        )
+        return JSONResponse(status_code=429, content={"error": "too many login attempts"},
+                            headers={"Retry-After": "5"})
     if user is None:
-        audit_svc.write_event(
+        await run_in_threadpool(
+            audit_svc.write_event,
             category="auth",
             event_type="auth.login_failed",
             outcome="denied",
@@ -52,12 +69,13 @@ async def login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
         )
         return err("Invalid username or password", 401)
     valid_device_id = (body.id or "").strip() if validate_rustdesk_id(body.id) is None else ""
-    s = create_session(db, user, device_id=valid_device_id)
+    s = await run_in_threadpool(create_session, db, user, valid_device_id)
     login_details = {"type": body.type}
     if valid_device_id:
         # Same id the client later registers on rendezvous; safe, not a secret.
         login_details["device_id"] = valid_device_id
-    audit_svc.write_event(
+    await run_in_threadpool(
+        audit_svc.write_event,
         category="auth",
         event_type="auth.login",
         outcome="success",

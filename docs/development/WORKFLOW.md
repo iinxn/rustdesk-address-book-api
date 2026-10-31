@@ -175,9 +175,11 @@ journalctl -u rustdesk-manager -f
    HTTPS `:8443`, и plaintext `:8080`. Для production plaintext-блок нужно
    убрать (SEC-009).
 
-Legacy-cookie сейчас `https_only=False` (SEC-017): за HTTPS-прокси это
-означает, что cookie может уйти по HTTP, если такой путь доступен. Не
-открывай HTTP-вход.
+Legacy-cookie получает `Secure` автоматически на HTTPS-запросах
+(`SESSION_COOKIE_SECURE=auto`). За прокси это работает, если прокси шлёт
+`X-Forwarded-Proto` и подключается с loopback (uvicorn доверяет
+`127.0.0.1`/`::1`). Только HTTPS-доступ к панели — `SESSION_COOKIE_SECURE=1`;
+панель по plain HTTP внутри VPN — `auto` или `0`.
 
 ## 7. Shim
 
@@ -196,7 +198,13 @@ SHIM_UPSTREAM=127.0.0.1:21166
 SHIM_ID_KEY=/abs/path/to/id_ed25519
 SHIM_MAX_CONNS=200
 SHIM_PER_IP_PER_MIN=30
+# UDP rendezvous: ~1 сессия на устройство, отдельно от TCP
+SHIM_UDP_MAX_SESSIONS=2048
+SHIM_UDP_PER_IP_PER_MIN=600
 ```
+
+Каждая UDP-сессия держит сокет: при systemd проверь `LimitNOFILE` (шим
+поднимает soft-лимит сам, но не выше hard).
 
 Проверка:
 

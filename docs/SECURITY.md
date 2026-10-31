@@ -28,7 +28,7 @@
 | Залогиненный пользователь | свои книги + shared по `rule` | ограниченное; права проверяются на каждом запросе |
 | Admin | все shared-книги, пользователи, discovery cleanup | высокое, но не безграничное (нельзя удалить/disable себя) |
 | SPA в браузере | `/api/v1/*` с Bearer из `localStorage` | XSS = кража токена |
-| Legacy-панель | cookie `session` | CSRF-риск, `https_only=False` |
+| Legacy-панель | cookie `session` | CSRF-риск; cookie несёт только id серверной сессии, `Secure` на HTTPS |
 | Локальный пользователь хоста | файлы `.env`, `data/`, `keys/` | зависит от прав; сейчас не везде 600 |
 | Сеть между клиентом и API | HTTP | не доверяем; TLS только на прокси |
 | Сеть между shim и `hbbs` | HTTP-нет, TCP plaintext protobuf | должен быть loopback/LAN/доверенный |
@@ -62,6 +62,13 @@ VPN это или интернет. «API только через WG» кодо�
 
 - `POST /api/login` → bcrypt-проверка → `secrets.token_urlsafe(32)` →
   строка в `sessions`; срок `SESSION_DAYS` (30 по умолчанию, `0` = никогда).
+- bcrypt (~0,4 с CPU) выполняется в отдельном пуле
+  (`PASSWORD_HASH_WORKERS=2`), не в event loop и не в общем threadpool.
+  Сверх `PASSWORD_HASH_QUEUE=8` одновременных проверок вход сразу получает
+  `429` + `Retry-After: 5` (SEC-021). Пустой пароль не проверяется вовсе.
+- Пароль при создании/смене: непустой (не только пробелы), не больше 72 байт
+  UTF-8 (`password_error`, SEC-024). Пустое поле в `PUT /api/v1/users/{uid}`
+  по-прежнему значит «не менять». Минимальной длины/сложности нет.
 - Токен opaque, не JWT; подписи нет, проверка — поиск в БД.
 - `user_by_token` проверяет expiry и `is_disabled`; просроченный токен
   удаляется.
@@ -73,10 +80,19 @@ VPN это или интернет. «API только через WG» кодо�
 
 ### 4.2. Cookie (legacy `/panel/`)
 
-- Starlette `SessionMiddleware`: подпись `WEB_SECRET`, `SameSite=Lax`,
-  `https_only=False`, срок по умолчанию 14 дней.
-- `panel_user` проверяет `is_disabled` и очищает cookie; удалённый
-  пользователь теряет доступ.
+- `PanelSessionMiddleware` (обёртка Starlette `SessionMiddleware`): подпись
+  `WEB_SECRET`, `HttpOnly`, `SameSite=Lax`, срок cookie = `SESSION_DAYS`
+  (14 дней при `0`). `Secure` задаёт `SESSION_COOKIE_SECURE`: `auto`
+  (по умолчанию) — на HTTPS-запросах, включая прокси с `X-Forwarded-Proto`,
+  которому доверяет uvicorn; `1` — всегда; `0` — никогда (SEC-017).
+- Cookie хранит только `sid` — id строки `sessions`, не `uid` и не Bearer.
+  Logout удаляет строку, смена пароля/disable — все строки пользователя,
+  поэтому скопированная cookie перестаёт работать сразу (SEC-025). Старые
+  cookie с `uid` не принимаются — нужен повторный вход.
+- `panel_user` проверяет срок сессии и `is_disabled` и очищает cookie;
+  удалённый пользователь теряет доступ.
+- `/panel/login` ограничен как `/api/login` (`LOGIN_PER_MINUTE_PER_IP`,
+  отдельный bucket, SEC-022).
 - CSRF-токенов нет. `SameSite=Lax` блокирует cross-site POST с cookie, но не
   покрывает same-site/поддоменные сценарии.
 - Cookie живёт независимо от Bearer: logout из SPA не очищает panel-cookie
@@ -171,8 +187,8 @@ VPN это или интернет. «API только через WG» кодо�
   без шифра); plain-клиент проксируется без изменений.
 - UDP: **plaintext**, без криптографии; source IP spoofable. Это не баг,
   а свойство протокола.
-- Верхний предел: `SHIM_MAX_CONNS=200` одновременных TCP/UDP-сессий,
-  `SHIM_PER_IP_PER_MIN=30` новых подключений/сессий с IP, frame cap 2 MiB,
+- TCP: `SHIM_MAX_CONNS=200` одновременных соединений,
+  `SHIM_PER_IP_PER_MIN=30` новых соединений с IP, frame cap 2 MiB,
   `READ_TIMEOUT=60`, `FIRST_TIMEOUT=40`, UDP idle 120 с + sweep 30 с.
 - Discovery: парсятся только `register_peer`/`register_pk` до 4096 байт;
   новый ID на IP — `DISCOVERY_NEW_IDS_PER_IP_PER_MIN=30`; известный ID
@@ -255,7 +271,7 @@ UDP-спуфинг может искажать discovery/presence и нагру�
   в транзакции может откатить бизнес-операцию — это осознанный выбор:
   изменение без следа опаснее ошибки.
 
-## 11. Реестр SEC-001…SEC-020
+## 11. Реестр SEC-001…SEC-025
 
 Статусы на текущий код. «Исправлено» = проверено чтением кода; живого
 повторного теста в этой задаче не было, если не указано иное.
@@ -278,10 +294,15 @@ UDP-спуфинг может искажать discovery/presence и нагру�
 | SEC-014 | LOW | **Исправлено** | `Gate.sweep` раз в 60 с + при admit; UDP sweep также чистит. |
 | SEC-015 | LOW | **Исправлено** | `_tasks.add_done_callback(discard)`; `aclose` отменяет задачи. |
 | SEC-016 | LOW | **Принято** | legacy POST без CSRF-токенов, только `SameSite=Lax`. |
-| SEC-017 | MEDIUM при HTTP | **Открыто** | `https_only=False`, cookie 14 дней. Включать только вместе с TLS-прокси и флагом. |
+| SEC-017 | MEDIUM при HTTP | **Исправлено** (2026-10-31) | `SESSION_COOKIE_SECURE=auto`: `Secure` на HTTPS-запросах. Остаток: при прямом HTTP-доступе (VPN без TLS) cookie без `Secure` — так и задумано; срок = `SESSION_DAYS`. Тест: `tests/test_security_fixes.py`. |
 | SEC-018 | INFO | **Принято** | секреты в env/compose видны через `docker inspect`/`/proc`; штатно для Docker, держать compose под 600. |
 | SEC-019 | INFO | **Частично** | expired-сессии чистятся при login/use; фоновой задачи нет, `expires_at IS NULL` не удаляются. |
 | SEC-020 | INFO | **Открыто** | `data/app.pid` предсказуем, TOCTOU в `stop.sh`; влияние ограничено локальным пользователем. |
+| SEC-021 | HIGH | **Исправлено** (2026-10-31) | bcrypt в async `/api/login` блокировал event loop: 10 неудачных входов → heartbeat 3,7 с. Теперь отдельный пул + cap в полёте → `429`; после фикса heartbeat ≤30 мс в том же сценарии. Остаток: время ответа выдаёт существование логина (пароль проверяется только для существующего). |
+| SEC-022 | MEDIUM (HIGH при публичной панели) | **Исправлено** (2026-10-31) | `/panel/login` не имел rate limit. Теперь `LOGIN_PER_MINUTE_PER_IP`, отдельный bucket. Остаток: лимит только по IP, не по учётной записи. |
+| SEC-023 | HIGH при `SHIM_ENABLED=1` | **Частично** (2026-10-31) | UDP-relay делил с TCP лимит 200 сессий и 30 новых/мин на IP — меньше штатной потребности ~800 устройств. Теперь свой бюджет `SHIM_UDP_MAX_SESSIONS=2048`, `SHIM_UDP_PER_IP_PER_MIN=600`, неподтверждённые (1 датаграмма) сессии живут 30 с и вытесняются первыми, `RLIMIT_NOFILE` поднимается до нужного, логи агрегированы. Остаток: поддельный источник, присылающий ≥2 датаграмм с каждого адреса, всё ещё может занять таблицу — это свойство UDP; на живом парке не проверялось. |
+| SEC-024 | LOW | **Исправлено** (2026-10-31) | Можно было создать пользователя с пустым паролем и войти с ним; пароль >72 байт давал 500. Теперь `400` в API/панели/CLI, `create_user` отказывает, пустой пароль не аутентифицирует. |
+| SEC-025 | MEDIUM | **Исправлено** (2026-10-31) | Cookie панели содержала `uid` и жила 14 дней после смены пароля/logout. Теперь — id серверной сессии, отзыв мгновенный. Выход из SPA по-прежнему не отзывает Bearer (не cookie, отдельная задача). |
 
 ## 12. Принятые риски
 

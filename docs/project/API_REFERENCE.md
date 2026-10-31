@@ -46,6 +46,8 @@
 | `MAX_BODY_BYTES` | 5 MiB (по `Content-Length`) | `BodyCapMiddleware` |
 | `/api/sysinfo` | 32 KiB (фактическое чтение тела) | `rustdesk.sysinfo` |
 | `/api/login` | 20 запросов/мин на IP | `LOGIN_PER_MINUTE_PER_IP` |
+| `/panel/login` | 20 запросов/мин на IP (свой bucket) | `LOGIN_PER_MINUTE_PER_IP` |
+| проверки пароля в полёте | 8, сверх — `429` `{"error":"too many login attempts"}` + `Retry-After: 5` | `PASSWORD_HASH_QUEUE` |
 | `/api/heartbeat` | 20/мин на устройство (ключ `id` + IP) | `HEARTBEAT_PER_MINUTE_PER_DEVICE` |
 | `/api/heartbeat` | 6000/мин суммарно на IP (защита от флуда) | `HEARTBEAT_PER_MINUTE_PER_IP` |
 | `/api/sysinfo` | 6000/мин на IP (агрегатный потолок) | `SYSINFO_PER_MINUTE_PER_IP` |
@@ -706,9 +708,12 @@ RequestRelay); `conn_type` — `DEFAULT_CONN`, `FILE_TRANSFER`,
 
 ## 4. Legacy-панель `/panel/*`
 
-Cookie-сессия `session` (Starlette `SessionMiddleware`, подпись `WEB_SECRET`,
-`SameSite=Lax`, `https_only=False`, срок по умолчанию 14 дней). CSRF-токенов
-нет (SEC-016). `panel_user` проверяет `is_disabled` и очищает cookie.
+Cookie-сессия `session` (`PanelSessionMiddleware`, подпись `WEB_SECRET`,
+`HttpOnly`, `SameSite=Lax`, `Secure` по `SESSION_COOKIE_SECURE`, срок
+`SESSION_DAYS`). В cookie только id серверной строки `sessions`: logout и
+смена пароля/disable отзывают её сразу. CSRF-токенов нет (SEC-016).
+`panel_user` проверяет сессию и `is_disabled` и очищает cookie. При
+перегрузке проверки пароля `POST /panel/login` отвечает `429`.
 
 | Метод | Путь | Что делает |
 |---|---|---|

@@ -42,12 +42,28 @@ class Settings(BaseSettings):
     shim_id_key: str = ""
     shim_max_conns: int = 200
     shim_per_ip_per_min: int = 30
+    # UDP rendezvous has its own budget: every client socket is one relay
+    # session (one upstream socket), and the stock client re-registers every
+    # ~12 s, so ~800 devices need ~800 live sessions. Many of them may sit
+    # behind one NAT, hence a per-IP *new session* rate far above the TCP one.
+    shim_udp_max_sessions: int = 2048
+    shim_udp_per_ip_per_min: int = 600
     # Temporary diagnostics: log decrypted message types + target IDs
     # (never tokens/keys). Off by default.
     shim_diag_msgtypes: str = "0"
     # Request hardening.
     max_body_bytes: int = 5 * 1024 * 1024
+    # Applies to both `/api/login` and `/panel/login` (separate buckets).
     login_per_minute_per_ip: int = 20
+    # bcrypt runs in a small dedicated pool, never on the event loop. Logins
+    # beyond `password_hash_queue` in flight are refused with 429 instead of
+    # queueing: a password-guessing burst must not starve heartbeats.
+    password_hash_workers: int = 2
+    password_hash_queue: int = 8
+    # Panel cookie `Secure` flag: "auto" sets it when the request arrived over
+    # HTTPS (directly or via a reverse proxy that sends X-Forwarded-Proto),
+    # "1" always, "0" never (plain-HTTP panel over a trusted VPN only).
+    session_cookie_secure: str = "auto"
     # Heartbeat: the stock client sends one every ~15s (4/min). Each device gets
     # its own bucket keyed by (id, client IP); the per-IP value is an aggregate
     # flood cap that must cover every device behind one NAT: 800 devices at

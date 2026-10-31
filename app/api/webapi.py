@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import current_user
 from app.core.config import settings
 from app.core.crypto import encrypt_password
+from app.core.security import password_error
 from app.core.validators import validate_rustdesk_id
 from app.models.models import (
     AddressBook,
@@ -992,6 +993,10 @@ def list_users(user: User = Depends(current_user), db: Session = Depends(get_db)
 def create_panel_user(body: UserIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
     if not user.is_admin:
         return err("admin required", 403)
+    if not body.username.strip():
+        return err("missing username", 400)
+    if (problem := password_error(body.password)) is not None:
+        return err(problem, 400)
     if db.scalar(select(User).where(User.username == body.username)):
         return err("duplicate", 409)
     problem = display_name_error(body.display_name)
@@ -1031,6 +1036,11 @@ def update_panel_user(uid: str, body: dict, user: User = Depends(current_user), 
         "is_admin": str(u.is_admin),
         "is_disabled": str(u.is_disabled),
     }
+    # Empty/absent password means "keep the current one" (panel form contract);
+    # any other value must satisfy the policy before anything is changed.
+    new_password = body.get("password")
+    if new_password not in (None, "") and (problem := password_error(new_password)) is not None:
+        return err(problem, 400)
     if "username" in body:
         new_name = str(body["username"]).strip()
         if not new_name:
