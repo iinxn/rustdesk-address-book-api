@@ -24,8 +24,10 @@
 
 ## 2. Текущая ревизия
 
-`alembic_version.version_num = '0004'` — фактическое состояние рабочих баз
-`data/base.db` и `data/pc-service.db` (обе на `0004`, содержимое разное).
+`alembic_version.version_num = '0006'` — целевое состояние после старта
+приложения. Рабочие базы `data/base.db` и `data/pc-service.db` до первого
+запуска новой версии могут оставаться на `0004`/`0005` (обе содержат разные
+данные); `0005` и `0006` аддитивны и не меняют существующие строки.
 
 Цепочка миграций:
 
@@ -35,9 +37,13 @@
 | `0002` | `0002_last_seen.py` | добавляет `address_book_entries.last_seen` |
 | `0003` | `0003_drop_customers.py` | удаляет `address_book_entries.customer_id` и таблицу `customers` через `batch_alter_table` |
 | `0004` | `0004_discovery_and_device_info.py` | аддитивно создаёт `discovered_devices` и `device_info` + индексы |
+| `0005` | `0005_audit_events.py` | аддитивно создаёт `audit_events` + индексы для журнала |
+| `0006` | `0006_session_device_id.py` | аддитивно добавляет `sessions.device_id` (default `""`) + индекс |
 
 Все ревизии имеют `upgrade()` и `downgrade()`. `0004.downgrade()` удаляет
-только две новые таблицы; данные книг не затрагиваются.
+только две новые таблицы, `0005.downgrade()` — только `audit_events`; данные
+книг, устройств и пользователей не затрагиваются. `0006.downgrade()`
+удаляет только `sessions.device_id` и его индекс.
 
 ## 3. Таблицы
 
@@ -68,12 +74,15 @@
 | `token` | String(255) | NOT NULL, UNIQUE, index | opaque Bearer (`secrets.token_urlsafe(32)`) |
 | `created_at` | DateTime | NOT NULL | naive UTC |
 | `expires_at` | DateTime | NULL | `NULL` = бессрочно (`SESSION_DAYS=0`) |
+| `device_id` | String(64) | NOT NULL, default `""`, index | RustDesk ID из тела `POST /api/login` (`id`); `""` для панели/SPA и строк до `0006` |
 
 Очистка: `purge_expired_sessions()` вызывается при создании сессии,
 `user_by_token()` удаляет конкретную просроченную строку при обращении.
 `destroy_user_sessions()` удаляет все сессии пользователя при disable или
 смене пароля. В таблице хранится **сырой токен** — это осознанный компромисс
-ради простоты; БД должна быть защищена как секрет.
+ради простоты; БД должна быть защищена как секрет. Журнал подключений
+сопоставляет SHA-256 токена из rendezvous-запроса с этой таблицей в памяти,
+ни токен, ни его хеш никуда не записываются (`DECISIONS.md` DEC-018).
 
 ### 3.3. `address_books`
 
@@ -220,6 +229,58 @@ permission. Отдельного API управления permissions в пан�
 `/api/sysinfo`. `device_info` не связана FK с книгами и может существовать
 для ID, которого нет ни в одной книге.
 
+### 3.10. `audit_events`
+
+Append-only журнал доступа, аутентификации, изменений данных и переходов
+состояния устройств. Пишется сервисом `app/services/audit.py`; обычный код
+только добавляет строки, удаляет их только retention-задача.
+
+| Колонка | Тип | Ограничения | Смысл |
+|---|---|---|---|
+| `id` | String(36) | PK | UUID события |
+| `timestamp` | DateTime | NOT NULL, index | naive UTC |
+| `category` | String(16) | NOT NULL, index | `access`, `auth`, `device`, `data`, `security`, `system` |
+| `event_type` | String(48) | NOT NULL, index | например `auth.login`, `entry.update`, `device.offline` |
+| `actor_type` | String(16) | NOT NULL, index | `user`, `device`, `shim`, `system`, `anonymous` |
+| `actor_id` | String(64) | NOT NULL, index | id пользователя/устройства; `""` = неизвестно |
+| `actor_name` | String(128) | NOT NULL | display name/username на момент события |
+| `source_ip` | String(64) | NOT NULL, index | IP из `client_ip`; `""` = системное событие |
+| `destination` | String(32) | NOT NULL | `api`, `panel`, `shim`, `system` |
+| `http_method` | String(8) | NOT NULL | метод для HTTP-события |
+| `route` | String(255) | NOT NULL | шаблон маршрута (`/api/v1/entries/{eid}`), не сырой URL |
+| `target_type` | String(32) | NOT NULL | `device`, `book`, `tag`, `user` |
+| `target_id` | String(128) | NOT NULL | id объекта |
+| `outcome` | String(16) | NOT NULL, index | `success`, `denied`, `error`, `partial`, `unknown` |
+| `status_code` | Integer | NULL | HTTP-статус |
+| `duration_ms` | Integer | NULL | длительность запроса |
+| `request_id` | String(36) | NOT NULL, index | `X-Request-ID`, связывает ответ и строку |
+| `details` | Text | NOT NULL, default `{}` | редактированный JSON ≤4 KiB |
+
+Индексы: одиночные по времени, категории, типу события, актору, IP,
+результату и `request_id`; составные `(category, timestamp)`,
+`(event_type, timestamp)`, `(target_type, target_id)` для фильтров UI.
+
+Семантика:
+
+- **Два потока.** Бизнес-события (`record`) пишутся в транзакции изменения:
+  если строку не удалось сохранить, операция откатывается. События
+  аутентификации, отказов и доступа (`write_event`) идут отдельной сессией
+  best-effort и переживают rollback основной операции.
+- **Не всё подряд.** Heartbeat и sysinfo не создают строку на запрос; для
+  устройств пишутся только реальные переходы `discovered`/`online`/`offline`
+  в `discovery.drain_once`. Повторные чтения одного ресурса схлопываются на
+  `AUDIT_READ_DEDUPE_SEC`, а 429 — на окно `note_rate_limited`.
+- **Секреты.** `details` собирается вызывающим кодом вручную и проходит
+  редактирование по именам ключей; тела запросов, пароли, токены, cookie и
+  приватные ключи не сохраняются. Значения ограничены 512 символами,
+  словарь — 4 KiB.
+- **Retention.** `AUDIT_RETENTION_DAYS` (по умолчанию 90, clamp 30…90)
+  удаляет строки старше срока батчами по 500, без `VACUUM` и пересоздания
+  таблицы. После успешного прогона пишется строка `audit.retention`.
+- **Не FK.** Журнал намеренно не ссылается на `users`/`address_books`:
+  удаление пользователя или устройства не должно удалять историю. `actor_id`
+  и `target_id` — снимок на момент события.
+
 ## 4. Связи
 
 ```mermaid
@@ -236,7 +297,8 @@ erDiagram
 
 `discovered_devices` и `device_info` намеренно **не связаны** FK с
 `address_book_entries`: это независимые источники, которые сопоставляются по
-`rustdesk_id` только на чтении.
+`rustdesk_id` только на чтении. `audit_events` — тоже отдельная таблица без
+FK: это исторический снимок, он не должен исчезать вместе с объектом.
 
 ## 5. Три источника присутствия — не смешивать
 
@@ -336,4 +398,8 @@ erDiagram
 - `device_info` не чистится автоматически; хранит последний отчёт.
 - `entry_tags` не имеет индексов сверх PK; при очень больших книгах
   фильтрация по тегам выполняется в Python (`/api/v1`), а не SQL.
-- Audit log отсутствует: кто менял запись, кроме `updated_at`, не известно.
+- `audit_events` чистится фоновой задачей по `AUDIT_RETENTION_DAYS`
+  (30…90, по умолчанию 90): батчи по 500, максимум 100 000 строк за прогон,
+  затем следующий прогон. `VACUUM` не выполняется, файл БД может не
+  уменьшиться сразу. Ручной запуск — `audit.cleanup_once()`; API удаления
+  строк нет.

@@ -636,6 +636,74 @@ entries/tags).
 **после следующего входа** клиента, а не мгновенно. Подробности —
 `docs/knowledge/DECISIONS.md` DEC-015.
 
+### 3.15. Журнал событий (admin only)
+
+| Метод | Путь | Параметры/тело | Ответ |
+|---|---|---|---|
+| GET | `/api/v1/audit/meta` | — | `{"categories":[...],"outcomes":[...],"event_types":[...],"target_types":[...],"retention_days":90,"enabled":true}` |
+| GET | `/api/v1/audit` | query-фильтры ниже | `{"total":N,"data":[event,...]}` |
+| GET | `/api/v1/audit/{eid}` | — | один `event` или `404 {"detail":"not found"}` |
+
+Не-админ получает `403 {"detail":"admin required"}`; без Bearer — `401`.
+Страница SPA `/audit` вызывает эти же методы.
+
+Фильтры `/api/v1/audit` (все необязательные, серверные):
+
+| Параметр | Смысл |
+|---|---|
+| `page`, `page_size` | страница (с 1), размер 1…200, по умолчанию 50 |
+| `sort` | `desc` (по умолчанию) или `asc` по `timestamp` |
+| `category` | `access`, `auth`, `connection`, `device`, `data`, `security`, `system` |
+| `event_type` | точное значение, например `entry.update` |
+| `outcome` | `success`, `denied`, `error`, `partial`, `unknown` |
+| `actor` | подстрока по `actor_name` или `actor_id` |
+| `source_ip` | подстрока по IP |
+| `target_type`, `target_id` | тип объекта и подстрока по id |
+| `search` | подстрока по event id, request id, route, target id, actor name |
+| `since`, `until` | ISO 8601; naive трактуется как UTC, `Z`/offset поддерживается |
+
+Форма события:
+
+```json
+{
+  "id": "uuid", "timestamp": "2026-10-29T12:00:00", "category": "data",
+  "event_type": "entry.update", "actor_type": "user", "actor_id": "uuid",
+  "actor_name": "admin", "source_ip": "203.0.113.10", "destination": "api",
+  "http_method": "PUT", "route": "/api/v1/entries/{eid}",
+  "target_type": "device", "target_id": "123456789",
+  "outcome": "success", "status_code": 200, "duration_ms": 12,
+  "request_id": "hex", "details": {"fields": {"alias": {"from": "a", "to": "b"}}}
+}
+```
+
+`details` — редактированный JSON: пароли/токены/cookie заменены на
+`"<redacted>"`, значения ограничены, тела запросов не сохраняются. Поле
+`password_changed: true` означает факт смены, а не само значение. `actor_*`
+и `target_*` могут быть пустыми (`""`) для системных событий и анонимных
+запросов; UI показывает «Неизвестно», а не выдумывает пользователя.
+
+События `category=connection` (`event_type=connection.request`) пишет
+discovery-drain по запросам шима (см. `ARCHITECTURE.md` §7.3): `actor_*` —
+пользователь, чей API-токен был в запросе (или `actor_type=device`, если
+токена нет), `target_type=device`, `target_id` — ID цели, `outcome=unknown`,
+`destination=shim`. `details`:
+
+```json
+{"username": "admin", "from_id": "987654321", "from_name": "ПК бухгалтерии",
+ "to_id": "123456789", "to_name": "касса", "via": "direct",
+ "conn_type": "DEFAULT_CONN", "actor_source": "token", "observed": "rendezvous"}
+```
+
+`via` — первый увиденный запрос (`direct` = PunchHoleRequest, `relay` =
+RequestRelay); `conn_type` — `DEFAULT_CONN`, `FILE_TRANSFER`,
+`PORT_FORWARD`, `RDP`, `VIEW_CAMERA`, `TERMINAL`; `actor_source` — `token`,
+`token_expired`, `session`, `book_owner`, `device`.
+
+`X-Request-ID` возвращается на всех ответах (включая ошибки) и совпадает с
+`request_id` соответствующей строки, если она записана. Повторные чтения
+одного ресурса и повторные 429 могут быть схлопнуты — это защита журнала от
+раздувания, а не потеря бизнес-события.
+
 ## 4. Legacy-панель `/panel/*`
 
 Cookie-сессия `session` (Starlette `SessionMiddleware`, подпись `WEB_SECRET`,
@@ -685,14 +753,16 @@ Cookie-сессия `session` (Starlette `SessionMiddleware`, подпись `WE
 - 2FA/TFA, verificationCode, привязки к устройству.
 - Групп устройств (только заглушки).
 - API управления `address_book_permissions` (правилами shared-книг).
-- Audit log.
+- Удаления/редактирования строк `audit_events`: журнал append-only, чистится
+  только retention-задачей; отдельного API для этого нет.
 - Публичного `/metrics`.
 - Автоматической очистки `discovered_devices`/`device_info`.
 
 ## 7. Проверка контракта
 
-Автотесты покрывают только heartbeat rate limiting и sysinfo write-once.
-После изменения API выполни ручной smoke из `docs/development/TESTING.md`:
+Автотесты покрывают heartbeat rate limiting, sysinfo write-once, display name
+и audit log (`tests/test_audit.py`). После изменения API выполни ручной smoke
+из `docs/development/TESTING.md`:
 login → `/api/ab/personal` → `/api/ab/peers` → `/api/v1/address-books` →
 нужный сценарий. Для RustDesk-контракта обязательна проверка живым клиентом:
 формы ответов нельзя считать «очевидными».

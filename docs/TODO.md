@@ -11,21 +11,25 @@
 
 ## 0. Текущее состояние (handoff)
 
-**Дата:** 2026-10-28. **Последний коммит:** `afc1d46` (`feat: add TODO.md for tracking development status and tasks`). Рабочее дерево содержит незакоммиченные правки heartbeat/sysinfo-фиксов и документации.
+**Дата:** 2026-10-29. **Последний коммит:** `afc1d46` (`feat: add TODO.md for tracking development status and tasks`). Рабочее дерево содержит незакоммиченные правки heartbeat/sysinfo-фиксов, SPA/i18n/display-name и audit-журнала.
 
 - Приложение не запущено. `data/app.pid` содержит **протухший** PID
   (процесс не существует) — это ожидаемое последствие ручной остановки, а не
   доказательство работы.
 - `SHIM_ENABLED=0`; shim в текущей конфигурации выключен. Включать его —
   отдельное решение владельца, а не задача «по умолчанию».
-- Автотесты есть для heartbeat и sysinfo
-  (`tests/test_heartbeat_rate_limit.py`, `tests/test_sysinfo_upload.py`),
+- Автотесты есть для heartbeat, sysinfo, display name и audit
+  (`tests/test_heartbeat_rate_limit.py`, `tests/test_sysinfo_upload.py`,
+  `tests/test_users_display_name.py`, `tests/test_audit.py`),
   `pytest`/`httpx` — в `requirements-dev.txt`. Полного покрытия нет
   (см. `TODO-003`).
+- 2026-10-30: проект передан Claude. Миграция `0006` (`sessions.device_id`)
+  и журнал подключений — см. `TODO-015`; `data/base.db` пока на `0005`.
 - `compileall` и импорт `app.main` проходят; `alembic history` видит
-  `0001–0004`. Frontend собран 2026-10-28: `npm run build` и `npm run lint`
+  `0001–0006`. Frontend собран 2026-10-29: `npm run build` и `npm run lint`
   проходят (Node.js 22 из временного каталога), `frontend/dist` пересобран
-  и отдаётся запущенным приложением. Постоянно `node`/`npm` в системе нет.
+  (`index-CmBzXjCQ.js`, `index-BqUVhR_9.css`). Постоянно `node`/`npm` в
+  системе нет.
 - Heartbeat-фикс: per-device + aggregate per-IP лимиты, `Retry-After`,
   SQLite-запись в threadpool. Синтетически проверено 800 устройств и
   параллельный всплеск; живой прогон на production-парке не выполнялся.
@@ -33,6 +37,13 @@
   запись только для известных панели ID, перезапись — одноразовым
   разрешением из кнопки «Refresh info», лимит 6000/мин на IP. 800 устройств
   на первом старте и 800 повторных upload-ов проверены на временной БД.
+- Audit-журнал (2026-10-29): таблица `audit_events` (миграция `0005`),
+  `app/services/audit.py`, `AuditMiddleware`, admin-only API
+  `/api/v1/audit*` и SPA-страница `/audit`. Access-строки пишутся только для
+  значимых запросов, бизнес-события — в транзакции изменения, auth/отказы —
+  best-effort. Retention 30…90 дней (по умолчанию 90). `tests/test_audit.py`
+  — 17 тестов; полный `pytest` — 49 passed, 2 skipped (load-тесты).
+  См. `docs/knowledge/DECISIONS.md` DEC-017.
 - UI: подзаголовок `Brand` — «Address Book Panel by iinxn» со ссылкой на
   `https://github.com/iinxn`; он же виден на окне входа SPA. В боковой
   панели остаётся ранее добавленная строка «Developed by iinxn».
@@ -49,16 +60,38 @@
 - База знаний создана: `AGENTS.md`, `docs/project/*`, `docs/development/*`,
   `docs/SECURITY.md`, `docs/knowledge/*`, два Skill в `.opencode/skills/`.
 
-**Активной задачи нет.** Рекомендуемый следующий шаг — `TODO-001`, затем
-`TODO-002`/`TODO-003`. Не начинай все пункты сразу: выполняй задачу
+**Активная задача — `TODO-015`** (журнал подключений): код и автотесты
+готовы, остались сборка frontend и проверка на живом клиенте. После неё —
+`TODO-001`, затем `TODO-002`/`TODO-003`. Не начинай все пункты сразу: выполняй задачу
 пользователя и только связанные с ней подзадачи.
 
 ## 1. Текущие задачи
 
-Нет задачи, над которой сейчас ведётся работа. При возобновлении разработки
-сначала определи её по запросу пользователя, затем по этому файлу и
-состоянию git; если однозначно определить нельзя — задай один уточняющий
-вопрос.
+### TODO-015. Журнал подключений: «пользователь → устройство»
+
+- [ ] **Приоритет:** высокий (запрос владельца, 2026-10-30).
+
+- **Компонент:** `app/shim/shim.py`, `app/services/connections.py`,
+  `app/services/discovery.py`, миграция `0006`, `frontend/src/pages/Audit.tsx`,
+  `frontend/src/i18n.tsx`.
+- **Сделано (2026-10-30):** шим отдаёт SHA-256 токена из
+  `PunchHoleRequest`/`RequestRelay`; drain сопоставляет его с
+  `sessions.token` и пишет `connection.request` от имени пользователя с
+  alias/hostname цели и ID инициатора из логина (DEC-018); повторы и
+  relay-fallback схлопываются; категория «Подключения» и блок деталей в SPA;
+  RU-переводы; `tests/test_connections.py` (7 тестов), тест миграции
+  проверяет текущий head. Полный `pytest`: 56 passed, 2 skipped.
+- **Критерии готовности (остаток):**
+  - `cd frontend && npm run build && npm run lint` проходят, `frontend/dist`
+    пересобран (на машине 2026-10-30 нет `node`/`npm`, сборка не выполнялась);
+  - backup `data/base.db` перед первым стартом (миграция `0005→0006`);
+  - живой прогон с `SHIM_ENABLED=1`: клиент, вошедший в API, подключается к
+    устройству → строка с его логином и alias цели; клиент без входа →
+    «Неопознанный клиент»; в логах шима нет токена.
+- **Ограничения:** запрос на подключение ≠ установленный сеанс
+  (`outcome=unknown`); при `other_server` клиент шлёт пустой токен.
+- **Связанные документы:** `ARCHITECTURE.md` §7.3, `API_REFERENCE.md`
+  (audit), `DATA_MODEL.md` (`sessions.device_id`), `SECURITY.md` §8.
 
 ## 2. К выполнению
 
@@ -85,7 +118,7 @@
 - **Критерии готовности:** `Dockerfile`, `docker-compose.yml` и
   `.dockerignore` убраны из `.gitignore` и отслеживаются git; чистая копия
   репозитория собирается (`docker compose build`); в образе есть все
-  миграции `0001–0004`; контейнер стартует и `/health/ready` отвечает.
+  миграции `0001–0006`; контейнер стартует и `/health/ready` отвечает.
 - **Зависимости и ограничения:** нужно решение владельца поддерживать
   Docker-путь; сборка требует сети для Node/Python-зависимостей. Секреты и
   `.env` в git не попадают. Если Docker не поддерживается — удалить раздел
@@ -100,9 +133,13 @@
 - **Компонент:** `tests/`, тестовые зависимости, CI (если появится).
 - **Сделано частично:** `requirements-dev.txt`, `pytest.ini`,
   `tests/test_heartbeat_rate_limit.py` (heartbeat, 800 устройств,
-  параллельный всплеск, 429/`Retry-After`, chunked, лимиты login) и
+  параллельный всплеск, 429/`Retry-After`, chunked, лимиты login),
   `tests/test_sysinfo_upload.py` (write-once, разрешение из панели,
-  неизвестные ID, 800 устройств на первом старте и повторно).
+  неизвестные ID, 800 устройств на первом старте и повторно),
+  `tests/test_users_display_name.py` (display name) и
+  `tests/test_audit.py` (access/auth/business-события, секреты, 429,
+  фильтры, admin-only, retention, миграция `0004→head`, конкурентные
+  записи), `tests/test_connections.py` (журнал подключений).
 - **Критерии готовности (остаток):** покрыты login/logout, disable и смена
   пароля, IDOR книг с `rule` 1/2/3, bulk-частичный успех, миграции
   upgrade/downgrade на копии, валидация ID; `pytest` зелёный; тесты не
@@ -282,8 +319,8 @@
 спринта. Если пункт превращается в задачу — перенеси его в «К выполнению»,
 а не дублируй.
 
-- **Автотесты покрывают только heartbeat rate limiting и sysinfo
-  write-once.** Остальные области и CI отсутствуют; расширение
+- **Автотесты покрывают heartbeat rate limiting, sysinfo write-once,
+  display name и audit log.** Остальные области и CI отсутствуют; расширение
   запланировано в `TODO-003`. Не добавляй фиктивный `pytest.ini` ради
   зелёного отчёта.
 - **Rate limit — in-memory и per-process.** `python -m app` запускает один
@@ -291,7 +328,9 @@
   store нет. Не масштабировать processes без пересмотра лимитеров.
 - **Naive UTC во всех слоях (SEC-012).** Компенсация — `parseUtc` на
   frontend. Менять только полной миграцией БД/API/UI, не точечно.
-- **Нет audit log.** Кто изменил запись, кроме `updated_at`, не известно.
+- **Audit log append-only, но не WORM.** Admin с доступом к БД/файлу может
+  изменить строки; защита — права файла, хост и retention. Чтение — только
+  admin, отдельной роли аудитора нет. См. DEC-017.
 - **Нет `/metrics` и фонового мониторинга.** Health-check есть, метрик нет.
 - **Rate limit только на login/heartbeat/sysinfo.** Остальные `/api/*` не
   throttled; это осознанное MVP-ограничение, но нагрузочный риск.
@@ -384,6 +423,27 @@ naive UTC в UI, `stop.sh`, `Gate.sweep`, `_tasks`), описаны в
 Короткая история, полезная для понимания текущего состояния. Не добавляй
 сюда каждое изменение.
 
+- [x] **Audit-журнал и технические логи** (2026-10-29):
+  - `audit_events` (миграция `0005`, аддитивно) + `AuditEvent`;
+  - `app/services/audit.py` — `record` в транзакции изменения,
+    `write_event`/`write_events` best-effort, редактирование `details`,
+    `request_id`, retention 30…90 дней (по умолчанию 90) батчами без
+    `VACUUM`, троттлинг 429;
+  - `AuditMiddleware` — `X-Request-ID`, contextvar, access-строки только для
+    мутаций/4xx/5xx/конкретных чтений; heartbeat/sysinfo/audit-read
+    исключены, повторные чтения и 429 схлопываются;
+  - инструментированы `/api/*`, `/api/v1/*`, `/panel/*`, login/logout,
+    CRUD книг/устройств/тегов/пользователей, refresh/forget, переходы
+    discovery;
+  - admin-only `/api/v1/audit`, `/api/v1/audit/meta`,
+    `/api/v1/audit/{id}` и SPA `/audit` с фильтрами, пагинацией, деталями и
+    переходом в карточку устройства; RU/EN;
+  - `tests/test_audit.py` — 17 тестов; полный `pytest` — 49 passed,
+    2 skipped (load-тесты).
+  - **Не проверено:** живой браузерный прогон `/audit` (нет Playwright),
+    Docker/PostgreSQL, реальный парк устройств.
+  - См. `docs/knowledge/DECISIONS.md` DEC-017, `DATA_MODEL.md` §3.10,
+    `API_REFERENCE.md` §3.15, `TESTING.md` §1/§4.8.
 - [x] **UI SPA: уведомления, светлая тема, RU/EN** (2026-10-28):
   - `frontend/src/notifications.tsx` — один `NotificationProvider` на всё
     приложение, `useNotify()`, тост сверху по центру (`fixed`, `z-[100]`,

@@ -14,14 +14,16 @@ import time
 
 MAX_EVENTS = 20_000
 
-# (kind, rustdesk_id, ip, source, unix_ts)
-# kind: "seen" | "connect" | "disconnect" | "reset"
+# (kind, rustdesk_id, ip, source, unix_ts, extra)
+# kind: "seen" | "connect" | "disconnect" | "reset" | "connection"
+# `extra` is None or a small dict (connection events: from_id, via, conn_type,
+# token_hash = SHA-256 hex of the client API token; never the token itself).
 _q: queue.Queue = queue.Queue(maxsize=MAX_EVENTS)
 _dropped = 0
 
 
 def publish(kind: str, rustdesk_id: str, ip: str = "", source: str = "",
-            ts: float | None = None) -> bool:
+            ts: float | None = None, extra: dict | None = None) -> bool:
     """Enqueue an event. Never raises, drops on overflow (bounded memory)."""
     global _dropped
     rid = (rustdesk_id or "").strip()
@@ -33,6 +35,7 @@ def publish(kind: str, rustdesk_id: str, ip: str = "", source: str = "",
         (ip or "")[:64],
         (source or "")[:16],
         float(ts if ts is not None else time.time()),
+        extra or None,
     )
     try:
         _q.put_nowait(item)

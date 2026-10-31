@@ -137,6 +137,39 @@ export interface Stats {
   discovered_online: number;
 }
 
+export type AuditOutcome = 'success' | 'denied' | 'error' | 'partial' | 'unknown';
+
+/** One row of the server-side append-only audit log. */
+export interface AuditEvent {
+  id: string;
+  timestamp: string | null;
+  category: string;
+  event_type: string;
+  actor_type: string;
+  actor_id: string;
+  actor_name: string;
+  source_ip: string;
+  destination: string;
+  http_method: string;
+  route: string;
+  target_type: string;
+  target_id: string;
+  outcome: AuditOutcome | string;
+  status_code: number | null;
+  duration_ms: number | null;
+  request_id: string;
+  details: Record<string, unknown>;
+}
+
+export interface AuditMeta {
+  categories: string[];
+  outcomes: string[];
+  event_types: string[];
+  target_types: string[];
+  retention_days: number;
+  enabled: boolean;
+}
+
 export interface Page<T> {
   total: number;
   data: T[];

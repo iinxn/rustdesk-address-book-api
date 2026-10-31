@@ -5,9 +5,11 @@ from starlette.templating import Jinja2Templates
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
+from app.core.middleware import client_ip
 from app.db.session import get_db
 from app.models.models import AddressBook, AddressBookEntry, Tag, User
 from app.services import ab as ab_svc
+from app.services import audit as audit_svc
 from app.services.auth import authenticate, create_user
 
 router = APIRouter(prefix="/panel")
@@ -48,14 +50,50 @@ def login_page(request: Request):
 def login_post(request: Request, username: str = Form(""), password: str = Form(""), db: Session = Depends(get_db)):
     user = authenticate(db, username.strip(), password)
     if user is None:
+        audit_svc.write_event(
+            category="auth",
+            event_type="auth.login_failed",
+            outcome="denied",
+            actor_type="anonymous",
+            source_ip=client_ip(request),
+            destination="panel",
+            http_method="POST",
+            route="/panel/login",
+            status_code=401,
+            details={"username": username},
+        )
         return templates.TemplateResponse(request, "login.html", {"error": "Invalid login"}, status_code=401)
     request.session["uid"] = user.id
+    audit_svc.write_event(
+        category="auth",
+        event_type="auth.login",
+        outcome="success",
+        actor=user,
+        source_ip=client_ip(request),
+        destination="panel",
+        http_method="POST",
+        route="/panel/login",
+        status_code=303,
+    )
     return RedirectResponse("/panel/devices", status_code=303)
 
 
 @router.get("/logout")
-def logout(request: Request):
+def logout(request: Request, db: Session = Depends(get_db)):
+    user = panel_user(request, db)
     request.session.clear()
+    if user is not None:
+        audit_svc.write_event(
+            category="auth",
+            event_type="auth.logout",
+            outcome="success",
+            actor=user,
+            source_ip=client_ip(request),
+            destination="panel",
+            http_method="GET",
+            route="/panel/logout",
+            status_code=303,
+        )
     return RedirectResponse("/panel/login", status_code=303)
 
 
@@ -127,6 +165,22 @@ def device_create(
         db.add(e)
         db.flush()
         ab_svc.sync_entry_tags(db, e, [t.strip() for t in tags.split(",") if t.strip()])
+        audit_svc.record(
+            db,
+            category="data",
+            event_type="entry.create",
+            actor=user,
+            destination="panel",
+            target_type="device",
+            target_id=e.rustdesk_id,
+            details={
+                "entry_id": e.id,
+                "book_id": book,
+                "alias": e.alias,
+                "source": "legacy_panel",
+                "password_set": bool(password),
+            },
+        )
         db.commit()
     return RedirectResponse(f"/panel/devices?book={book}", status_code=303)
 
@@ -139,6 +193,21 @@ def device_delete(request: Request, eid: str, db: Session = Depends(get_db)):
     if e is not None:
         b = ab_svc.get_book_for_user(db, user, e.address_book_id)
         if b is not None and ab_svc.can_write(ab_svc.rule_for(db, user, b)):
+            audit_svc.record(
+                db,
+                category="data",
+                event_type="entry.delete",
+                actor=user,
+                destination="panel",
+                target_type="device",
+                target_id=e.rustdesk_id,
+                details={
+                    "entry_id": e.id,
+                    "book_id": e.address_book_id,
+                    "alias": e.alias,
+                    "source": "legacy_panel",
+                },
+            )
             db.delete(e)
             db.commit()
     return RedirectResponse(f"/panel/devices?book={book_id}", status_code=303)
@@ -169,7 +238,20 @@ def tag_create(request: Request, book: str = Form(""), name: str = Form(""), col
                 c = int(color, 0)
             except ValueError:
                 c = 0
-            db.add(Tag(address_book_id=book, name=name, color=c))
+            t = Tag(address_book_id=book, name=name, color=c)
+            db.add(t)
+            db.flush()
+            audit_svc.record(
+                db,
+                category="data",
+                event_type="tag.create",
+                actor=user,
+                destination="panel",
+                target_type="tag",
+                target_id=t.id,
+                details={"book_id": book, "name": t.name, "color": t.color,
+                         "source": "legacy_panel"},
+            )
             db.commit()
     return RedirectResponse(f"/panel/tags?book={book}", status_code=303)
 
@@ -182,6 +264,7 @@ def tag_update(request: Request, tid: str, name: str = Form(""), color: str = Fo
     if t is not None:
         b = ab_svc.get_book_for_user(db, user, t.address_book_id)
         if b is not None and ab_svc.can_write(ab_svc.rule_for(db, user, b)):
+            old = {"name": t.name, "color": str(t.color)}
             try:
                 t.color = int(color, 0)
             except ValueError:
@@ -189,6 +272,20 @@ def tag_update(request: Request, tid: str, name: str = Form(""), color: str = Fo
             name = name.strip()
             if name and name != t.name and db.scalar(select(Tag).where(Tag.address_book_id == t.address_book_id, Tag.name == name)) is None:
                 t.name = name
+            fields = audit_svc.diff_fields(
+                old, {"name": t.name, "color": str(t.color)}
+            )
+            audit_svc.record(
+                db,
+                category="data",
+                event_type="tag.update",
+                actor=user,
+                destination="panel",
+                target_type="tag",
+                target_id=t.id,
+                details={"book_id": t.address_book_id, "fields": fields,
+                         "source": "legacy_panel"},
+            )
             db.commit()
     return RedirectResponse(f"/panel/tags?book={book_id}", status_code=303)
 
@@ -201,6 +298,17 @@ def tag_delete(request: Request, tid: str, db: Session = Depends(get_db)):
     if t is not None:
         b = ab_svc.get_book_for_user(db, user, t.address_book_id)
         if b is not None and ab_svc.can_write(ab_svc.rule_for(db, user, b)):
+            audit_svc.record(
+                db,
+                category="data",
+                event_type="tag.delete",
+                actor=user,
+                destination="panel",
+                target_type="tag",
+                target_id=t.id,
+                details={"book_id": t.address_book_id, "name": t.name,
+                         "source": "legacy_panel"},
+            )
             db.delete(t)
             db.commit()
     return RedirectResponse(f"/panel/tags?book={book_id}", status_code=303)
@@ -221,7 +329,19 @@ def panel_user_create(request: Request, username: str = Form(""), password: str 
     if not admin.is_admin:
         return RedirectResponse("/panel/devices", status_code=303)
     if username.strip() and password and db.scalar(select(User).where(User.username == username.strip())) is None:
-        create_user(db, username.strip(), password, bool(is_admin))
+        u = create_user(db, username.strip(), password, bool(is_admin), commit=False)
+        audit_svc.record(
+            db,
+            category="security",
+            event_type="user.create",
+            actor=admin,
+            destination="panel",
+            target_type="user",
+            target_id=u.id,
+            details={"username": u.username, "is_admin": u.is_admin,
+                     "source": "legacy_panel"},
+        )
+        db.commit()
     return RedirectResponse("/panel/users", status_code=303)
 
 
@@ -231,6 +351,16 @@ def panel_user_delete(request: Request, uid: str, db: Session = Depends(get_db))
     if admin.is_admin:
         u = db.get(User, uid)
         if u is not None and u.id != admin.id:
+            audit_svc.record(
+                db,
+                category="security",
+                event_type="user.delete",
+                actor=admin,
+                destination="panel",
+                target_type="user",
+                target_id=u.id,
+                details={"username": u.username, "source": "legacy_panel"},
+            )
             db.delete(u)
             db.commit()
     return RedirectResponse("/panel/users", status_code=303)

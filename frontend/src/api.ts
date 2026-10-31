@@ -116,4 +116,12 @@ export const api = {
   me: () => req<import('./types').PanelUser>('GET', '/api/v1/me'),
   updateMe: (displayName: string) =>
     req<import('./types').PanelUser>('PUT', '/api/v1/me', { display_name: displayName }),
+  auditMeta: () => req<import('./types').AuditMeta>('GET', '/api/v1/audit/meta'),
+  audit: (q: Record<string, string | number>) => {
+    const p = new URLSearchParams();
+    for (const [k, v] of Object.entries(q)) if (v !== '' && v !== undefined) p.set(k, String(v));
+    return req<import('./types').Page<import('./types').AuditEvent>>('GET', `/api/v1/audit?${p}`);
+  },
+  auditEvent: (id: string) =>
+    req<import('./types').AuditEvent>('GET', `/api/v1/audit/${encodeURIComponent(id)}`),
 };

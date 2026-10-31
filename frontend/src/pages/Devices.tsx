@@ -116,6 +116,15 @@ export default function Devices() {
   }, [tab]);
 
   useEffect(() => {
+    // Deep link from the audit log: open this device's card once.
+    const wanted = sessionStorage.getItem('ab_device');
+    if (wanted) {
+      sessionStorage.removeItem('ab_device');
+      setDetailRid(wanted);
+    }
+  }, []);
+
+  useEffect(() => {
     api.books().then((list) => {
       setBooks(list);
       const wanted = sessionStorage.getItem('ab_book') || '';

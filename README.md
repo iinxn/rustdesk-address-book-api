@@ -27,8 +27,9 @@ implementation of that server API, extended with:
 
 - `API` (FastAPI) — login, personal/shared address books, peers, tags,
   device heartbeats (`/api/heartbeat` → `last_seen` presence).
-- `Web Panel` — React SPA at `/app/` for managing books, devices, tags
-  and users (a legacy server-rendered UI remains at `/panel/`).
+- `Web Panel` — React SPA at `/app/` for managing books, devices, tags,
+  users and the admin event log (a legacy server-rendered UI remains at
+  `/panel/`).
 - `KX shim` — a rendezvous proxy on TCP `21116`. Logged-in RustDesk clients
   require a server-first `KeyExchange` handshake that OSS `hbbs` never sends,
   which otherwise ends in `Failed to secure tcp: deadline has elapsed`.
@@ -51,7 +52,8 @@ Already implemented: login/token sessions, personal + shared books with
 read/write/full-control rules, peers CRUD, tag CRUD incl. colors and rename,
 user admin (incl. rename), book rename/delete, AND/OR tag filters, search, pagination, presence
 (`online`/`offline`/`unknown` + `last_seen`), rate limits, request size cap,
-per-connection caps on the shim, file permissions hardening, backup/restore CLI.
+per-connection caps on the shim, file permissions hardening, backup/restore CLI,
+and an admin-only append-only audit log (`/audit`, `/api/v1/audit*`).
 
 ## Quick start
 

@@ -16,6 +16,7 @@ from app.models.models import AddressBook, AddressBookEntry, EntryTag, Tag, User
 from app.schemas.rustdesk import LoginIn
 from app.core.validators import validate_rustdesk_id
 from app.services import ab as ab_svc
+from app.services import audit as audit_svc
 from app.services import device_info as info_svc
 from app.services import presence as presence_svc
 from app.services.auth import authenticate, create_session, destroy_session, user_by_token
@@ -34,11 +35,40 @@ def ok_empty() -> Response:
 # --- auth ---
 
 @router.post("/api/login")
-async def login(body: LoginIn, db: Session = Depends(get_db)):
+async def login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
     user = authenticate(db, body.username, body.password)
     if user is None:
+        audit_svc.write_event(
+            category="auth",
+            event_type="auth.login_failed",
+            outcome="denied",
+            actor_type="anonymous",
+            source_ip=client_ip(request),
+            destination="api",
+            http_method="POST",
+            route="/api/login",
+            status_code=401,
+            details={"username": body.username},
+        )
         return err("Invalid username or password", 401)
-    s = create_session(db, user)
+    valid_device_id = (body.id or "").strip() if validate_rustdesk_id(body.id) is None else ""
+    s = create_session(db, user, device_id=valid_device_id)
+    login_details = {"type": body.type}
+    if valid_device_id:
+        # Same id the client later registers on rendezvous; safe, not a secret.
+        login_details["device_id"] = valid_device_id
+    audit_svc.write_event(
+        category="auth",
+        event_type="auth.login",
+        outcome="success",
+        actor=user,
+        source_ip=client_ip(request),
+        destination="api",
+        http_method="POST",
+        route="/api/login",
+        status_code=200,
+        details=login_details,
+    )
     return {
         "access_token": s.token,
         "type": "access_token",
@@ -71,9 +101,22 @@ async def current_user_info(request: Request, db: Session = Depends(get_db), tok
 
 
 @router.post("/api/logout")
-async def logout(db: Session = Depends(get_db), token: str = Depends(bearer_token)):
+async def logout(request: Request, db: Session = Depends(get_db), token: str = Depends(bearer_token)):
+    user = user_by_token(db, token) if token else None
     if token:
         destroy_session(db, token)
+    if user is not None:
+        audit_svc.write_event(
+            category="auth",
+            event_type="auth.logout",
+            outcome="success",
+            actor=user,
+            source_ip=client_ip(request),
+            destination="api",
+            http_method="POST",
+            route="/api/logout",
+            status_code=200,
+        )
     return ok_empty()
 
 
@@ -95,6 +138,17 @@ async def ab_personal(user: User = Depends(current_user), db: Session = Depends(
     if book is None:  # defensive: user created before auto-book logic
         book = AddressBook(name="My address book", type="personal", owner_user_id=user.id)
         db.add(book)
+        db.flush()
+        audit_svc.record(
+            db,
+            category="data",
+            event_type="book.create",
+            actor=user,
+            destination="api",
+            target_type="book",
+            target_id=book.id,
+            details={"name": book.name, "type": book.type, "source": "rustdesk_client"},
+        )
         db.commit()
         db.refresh(book)
     return {"guid": book.id}
@@ -186,6 +240,23 @@ async def ab_peer_add(guid: str, request: Request, user: User = Depends(current_
     tags = data.get("tags", [])
     if isinstance(tags, list) and tags:
         ab_svc.sync_entry_tags(db, e, [str(t) for t in tags])
+    audit_svc.record(
+        db,
+        category="data",
+        event_type="entry.create",
+        actor=user,
+        destination="api",
+        target_type="device",
+        target_id=e.rustdesk_id,
+        details={
+            "entry_id": e.id,
+            "book_id": book.id,
+            "alias": e.alias,
+            "tags": [str(t) for t in tags] if isinstance(tags, list) else [],
+            "source": "rustdesk_client",
+            "password_set": bool(e.password_encrypted),
+        },
+    )
     db.commit()
     return ok_empty()
 
@@ -211,7 +282,43 @@ async def ab_peer_update(guid: str, request: Request, user: User = Depends(curre
     )
     if e is None:
         return err("not found", 404)
+    before = {
+        "alias": e.alias,
+        "note": e.note,
+        "username": e.username,
+        "hostname": e.hostname,
+        "platform": e.platform,
+        "hash": e.hash_value,
+        "password": "set" if e.password_encrypted else "",
+    }
+    before_tags = ab_svc.entry_tag_names(db, e.id)
     ab_svc.apply_peer_update(db, e, data, book)
+    after_tags = ab_svc.entry_tag_names(db, e.id)
+    fields = audit_svc.diff_fields(
+        {k: before[k] for k in ("alias", "note", "username", "hostname", "platform")},
+        {k: getattr(e, k) for k in ("alias", "note", "username", "hostname", "platform")},
+    )
+    if before["hash"] != e.hash_value:
+        fields["hash"] = "changed"
+    if before["password"] != ("set" if e.password_encrypted else ""):
+        fields["password_changed"] = True
+    if before_tags != after_tags:
+        fields["tags"] = {"from": before_tags, "to": after_tags}
+    audit_svc.record(
+        db,
+        category="data",
+        event_type="entry.update",
+        actor=user,
+        destination="api",
+        target_type="device",
+        target_id=e.rustdesk_id,
+        details={
+            "entry_id": e.id,
+            "book_id": book.id,
+            "fields": fields,
+            "source": "rustdesk_client",
+        },
+    )
     db.commit()
     return ok_empty()
 
@@ -229,6 +336,7 @@ async def ab_peer_delete(guid: str, request: Request, user: User = Depends(curre
         return err("bad json", 400)
     if not isinstance(ids, list):
         return err("expected id list", 400)
+    deleted: list[str] = []
     for rid in ids:
         e = db.scalar(
             select(AddressBookEntry).where(
@@ -237,6 +345,22 @@ async def ab_peer_delete(guid: str, request: Request, user: User = Depends(curre
         )
         if e is not None:
             db.delete(e)
+            deleted.append(e.rustdesk_id)
+    audit_svc.record(
+        db,
+        category="data",
+        event_type="entry.bulk_delete",
+        outcome="success" if deleted else "unknown",
+        actor=user,
+        destination="api",
+        target_type="device",
+        details={
+            "book_id": book.id,
+            "deleted_count": len(deleted),
+            "sample_deleted": deleted[:10],
+            "source": "rustdesk_client",
+        },
+    )
     db.commit()
     return ok_empty()
 
@@ -269,9 +393,31 @@ async def ab_tag_add(guid: str, request: Request, user: User = Depends(current_u
     color = int(data.get("color", 0) or 0)
     t = db.scalar(select(Tag).where(Tag.address_book_id == book.id, Tag.name == name))
     if t is None:
-        db.add(Tag(address_book_id=book.id, name=name, color=color))
+        t = Tag(address_book_id=book.id, name=name, color=color)
+        db.add(t)
+        db.flush()
+        event_type = "tag.create"
+        details = {"book_id": book.id, "name": t.name, "color": t.color}
     else:
+        old_color = t.color
         t.color = color
+        event_type = "tag.update"
+        details = {
+            "book_id": book.id,
+            "fields": audit_svc.diff_fields(
+                {"color": str(old_color)}, {"color": str(t.color)}
+            ),
+        }
+    audit_svc.record(
+        db,
+        category="data",
+        event_type=event_type,
+        actor=user,
+        destination="api",
+        target_type="tag",
+        target_id=t.id,
+        details={**details, "source": "rustdesk_client"},
+    )
     db.commit()
     return ok_empty()
 
@@ -296,6 +442,20 @@ async def ab_tag_rename(guid: str, request: Request, user: User = Depends(curren
     if t is None:
         return err("not found", 404)
     t.name = new
+    audit_svc.record(
+        db,
+        category="data",
+        event_type="tag.update",
+        actor=user,
+        destination="api",
+        target_type="tag",
+        target_id=t.id,
+        details={
+            "book_id": book.id,
+            "fields": audit_svc.diff_fields({"name": old}, {"name": new}),
+            "source": "rustdesk_client",
+        },
+    )
     db.commit()
     return ok_empty()
 
@@ -315,7 +475,24 @@ async def ab_tag_update(guid: str, request: Request, user: User = Depends(curren
     t = db.scalar(select(Tag).where(Tag.address_book_id == book.id, Tag.name == name))
     if t is None:
         return err("not found", 404)
+    old_color = t.color
     t.color = int(data.get("color", 0) or 0)
+    audit_svc.record(
+        db,
+        category="data",
+        event_type="tag.update",
+        actor=user,
+        destination="api",
+        target_type="tag",
+        target_id=t.id,
+        details={
+            "book_id": book.id,
+            "fields": audit_svc.diff_fields(
+                {"color": str(old_color)}, {"color": str(t.color)}
+            ),
+            "source": "rustdesk_client",
+        },
+    )
     db.commit()
     return ok_empty()
 
@@ -333,10 +510,27 @@ async def ab_tag_delete(guid: str, request: Request, user: User = Depends(curren
         return err("bad json", 400)
     if not isinstance(names, list):
         return err("expected tag list", 400)
+    deleted: list[dict] = []
     for name in names:
         t = db.scalar(select(Tag).where(Tag.address_book_id == book.id, Tag.name == str(name)))
         if t is not None:
+            deleted.append({"id": t.id, "name": t.name})
             db.delete(t)  # entry_tags cascade
+    audit_svc.record(
+        db,
+        category="data",
+        event_type="tag.bulk_delete",
+        outcome="success" if deleted else "unknown",
+        actor=user,
+        destination="api",
+        target_type="tag",
+        details={
+            "book_id": book.id,
+            "deleted_count": len(deleted),
+            "sample_deleted": deleted[:10],
+            "source": "rustdesk_client",
+        },
+    )
     db.commit()
     return ok_empty()
 

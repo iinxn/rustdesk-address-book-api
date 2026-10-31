@@ -73,6 +73,23 @@ class Settings(BaseSettings):
     # Expose FastAPI's /docs, /redoc and /openapi.json. Off by default
     # (production); DEV_MODE=1 turns them on automatically for local work.
     expose_docs: str = "0"
+    # --- Audit log (persistent SQLite history, see services/audit.py) ---
+    # "0" disables both access rows and explicit business events (technical
+    # logs keep working). The API then returns an empty log; it never falls
+    # back to in-memory history.
+    audit_enabled: str = "1"
+    # Kept as a string so an invalid env value is logged and clamped instead of
+    # crashing the process at import time. Effective range: 30..90 days.
+    audit_retention_days: str = "90"
+    # Daily by default. The first run happens shortly after startup so a
+    # long-running process cannot skip retention after a restart.
+    audit_cleanup_interval_sec: int = 86400
+    audit_cleanup_initial_delay_sec: int = 60
+    # Requests slower than this are logged as a technical warning. 0 = off.
+    audit_slow_request_ms: int = 2000
+    # Repeated reads of the same resource (panel polling) are collapsed into
+    # one access row per actor/route/target within this window.
+    audit_read_dedupe_sec: int = 300
 
     @property
     def resolved_database_url(self) -> str:
@@ -97,6 +114,10 @@ class Settings(BaseSettings):
     @property
     def docs_enabled(self) -> bool:
         return self.is_dev or self.expose_docs == "1"
+
+    @property
+    def audit_enabled_flag(self) -> bool:
+        return self.audit_enabled == "1"
 
     def require_secret(self, name: str, value: str, hint: str) -> None:
         if value or self.is_dev:

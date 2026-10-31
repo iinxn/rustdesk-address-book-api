@@ -3,14 +3,20 @@
 ## 1. Назначение
 
 Проект `rustdesk-ab-backend` — self-hosted backend для **штатного, немодифицированного**
-клиента RustDesk. Он решает три задачи:
+клиента RustDesk. Он решает четыре задачи:
 
 1. **Адресная книга.** Реализует совместимый с RustDesk Server Pro HTTP API
    `/api/*`: вход, личная и общие книги, устройства, теги, права.
 2. **Панель управления.** React SPA на `/app/` и legacy server-rendered
    панель на `/panel/` для работы с книгами, устройствами, тегами,
    пользователями и обнаруженными устройствами.
-3. **KX-shim.** Завершает server-first `KeyExchange` на TCP `21116`, без
+3. **Журнал событий.** Append-only история в SQLite: кто вошёл, кто изменил
+   книгу/устройство/тег/пользователя, кто получил отказ, откуда и с каким
+   результатом, а также категория «Подключения»: какой пользователь
+   запросил подключение к какому устройству (через шим, DEC-018).
+   Admin-only SPA `/audit` и API `/api/v1/audit*`; технические логи
+   остаются в stdout/stderr.
+4. **KX-shim.** Завершает server-first `KeyExchange` на TCP `21116`, без
    которого залогиненный клиент RustDesk 1.4.x не проходит secure rendezvous
    против OSS `hbbs`, и проксирует расшифрованный трафик в настоящий `hbbs`.
 
@@ -41,14 +47,15 @@
 | Запуск приложения | `app/__main__.py` | проверка настроек, каталоги/права, `alembic upgrade head`, запуск Uvicorn |
 | FastAPI-приложение | `app/main.py` | lifespan, middleware, роутеры, health, монтирование SPA |
 | RustDesk API | `app/api/rustdesk.py` | контракт клиента `/api/*`, сессии, книги, peers, tags, heartbeat, sysinfo |
-| Внутренний API | `app/api/webapi.py` | `/api/v1/*`: расширенные модели для SPA, bulk-операции, discovery, users |
+| Внутренний API | `app/api/webapi.py` | `/api/v1/*`: расширенные модели для SPA, bulk-операции, discovery, users, audit |
+| Журнал событий | `app/services/audit.py`, `app/core/middleware.py` | append-only `audit_events`, access/auth/business-события, retention |
 | Legacy-панель | `app/api/panel.py` | HTML-страницы `/panel/*` на cookie-сессии |
 | Доменные сервисы | `app/services/` | права книг, auth-сессии, presence, sysinfo, discovery |
-| Модели | `app/models/models.py` | 9 таблиц SQLAlchemy |
+| Модели | `app/models/models.py` | 10 таблиц SQLAlchemy |
 | Shim | `app/shim/shim.py` | TCP KX/plain proxy, UDP relay, discovery-события, лимиты |
 | Супервизор шима | `app/shim_supervisor.py` | фоновый поток, bounded backoff, статус для `/health/ready` |
-| SPA | `frontend/src/` | экраны Devices/Books/Tags/Users/Login, API-клиент |
-| Миграции | `alembic/versions/` | схема 0001–0004 |
+| SPA | `frontend/src/` | экраны Devices/Books/Tags/Users/Audit/Login, API-клиент |
+| Миграции | `alembic/versions/` | схема 0001–0006 |
 | CLI | `app/cli.py` | `create-admin`, `gen-key`, `dump-book`, `backup` |
 
 ## 4. Ключевые пользовательские сценарии

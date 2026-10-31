@@ -45,8 +45,8 @@ flowchart LR
     RS[rustdesk router<br/>/api/*]
     V1[webapi router<br/>/api/v1/*]
     PNL[panel router]
-    SVC[services<br/>ab/auth/presence/device_info/discovery]
-    DB[(SQLite<br/>Alembic 0001–0004)]
+    SVC[services<br/>ab/auth/presence/device_info/discovery/audit]
+    DB[(SQLite<br/>Alembic 0001–0006)]
     SUP[ShimSupervisor<br/>daemon thread]
     SHIM[KX shim<br/>TCP+UDP 21116]
     HBBS[real OSS hbbs<br/>rendezvous]
@@ -83,7 +83,12 @@ flowchart LR
    5 секунд вызывает `supervisor.watch()` для рестартов.
 3. Если `DISCOVERY_ENABLED=1`, запускает задачу: каждые 2 секунды
    `drain_once()` выполняется через `asyncio.to_thread` (своя DB-сессия).
-4. На shutdown отменяет задачи и останавливает shim (`join` до 10 с).
+4. Если `AUDIT_ENABLED=1`, пишет `system.startup` и запускает фоновую
+   retention-задачу: первая очистка через
+   `AUDIT_CLEANUP_INITIAL_DELAY_SEC`, далее раз в
+   `AUDIT_CLEANUP_INTERVAL_SEC` (по умолчанию сутки).
+5. На shutdown отменяет задачи, пишет `system.shutdown` (если аудит включён)
+   и останавливает shim (`join` до 10 с).
 
 `/health/ready`:
 
@@ -95,6 +100,7 @@ flowchart LR
 
 ```text
 Uvicorn
+  → AuditMiddleware (X-Request-ID, context, значимые access/security-события)
   → SessionMiddleware (cookie, WEB_SECRET, SameSite=Lax, https_only=False)
   → RateLimitMiddleware (per-IP для login/sysinfo; per-device + aggregate per-IP для heartbeat)
   → BodyCapMiddleware (Content-Length > MAX_BODY_BYTES → 413)
@@ -124,6 +130,37 @@ Uvicorn
   счётчиков пока не реализован.
 - `SessionMiddleware` нужен только legacy-панели; Bearer-токены SPA/клиента
   к cookie не привязаны.
+- `AuditMiddleware` — внешний слой: назначает `X-Request-ID`, кладёт
+  `request_id`/`source_ip`/маршрут в `contextvar` и после ответа пишет
+  access/security-строку только для значимых запросов (мутации, 4xx/5xx,
+  чтение конкретного ресурса). Повторные чтения и 429 схлопываются, а
+  `/api/heartbeat`, `/api/sysinfo*` и сам `/api/v1/audit` не журналируются
+  построчно. Технические логи остаются в stdout/stderr и не дублируются в
+  SQLite.
+
+### 4.1. Аудит и технические логи
+
+Два потока намеренно разделены:
+
+- **Техническая диагностика** — `logging` в stdout/stderr: ошибки,
+  медленные запросы (`AUDIT_SLOW_REQUEST_MS`), троттлинг 429. Ротацию
+  выполняет systemd/Docker; файлового handler'а в приложении нет.
+- **Исторический журнал** — таблица `audit_events` (см.
+  `DATA_MODEL.md` §3.10). Бизнес-изменения пишутся в той же транзакции, что
+  и само изменение (`audit_svc.record`); вход/выход, отказы и access-строки —
+  отдельной best-effort сессией (`write_event`), чтобы пережить rollback.
+- **Что не пишется:** тела запросов, пароли, токены, cookie, приватные ключи;
+  heartbeat/sysinfo на каждый запрос; удалённые сессии, которые архитектура
+  не наблюдает. Для устройств фиксируются только реальные переходы
+  `discovered`/`online`/`offline` из `discovery.drain_once`.
+- **Retention:** `AUDIT_RETENTION_DAYS` (30…90, по умолчанию 90), первая
+  очистка через `AUDIT_CLEANUP_INITIAL_DELAY_SEC` после старта, далее раз в
+  `AUDIT_CLEANUP_INTERVAL_SEC`; батчи по 500, без `VACUUM`.
+- **Выключение:** `AUDIT_ENABLED=0` отключает и access-строки, и явные
+  бизнес-события; технические логи продолжают работать, а API чтения
+  возвращает пустой журнал. Исторические строки при этом не удаляются.
+- **UI/API:** admin-only `/api/v1/audit`, `/api/v1/audit/meta`,
+  `/api/v1/audit/{id}` и SPA-страница `/audit`. Не-админ получает 403.
 
 ## 5. Аутентификация и сессии
 
@@ -276,6 +313,30 @@ sequenceDiagram
 - Discovery не влияет на `address_book_entries.last_seen` и не является
   доказательством личности.
 
+#### Журнал подключений (`category=connection`)
+
+- Инициатор открывает к rendezvous отдельное TCP-соединение и шлёт
+  `PunchHoleRequest` (при неудаче — `RequestRelay`). В сообщении есть ID
+  **цели** и `token` — API `access_token` клиента, если он вошёл в нашу
+  адресную книгу (штатный `client.rs`; с токеном клиент всегда идёт через
+  KX). Собственного ID инициатора в сообщении нет.
+- `_parse_control` возвращает ID цели, `conn_type` и `token_hash`
+  (SHA-256). Сам токен из потока шима не выходит. Повторы и
+  relay-fallback одной попытки схлопываются на
+  `DISCOVERY_CONNECTION_DEDUPE_SEC` (60 с) по ключу
+  `(from_id, token_hash, target, conn_type)`.
+- `drain_once` один раз на пачку строит в памяти словарь
+  `sha256(sessions.token) → session`, а `services/connections.py` пишет
+  событие `connection.request`: actor — пользователь сессии, `target_id` —
+  ID цели, `details` — `username`, `from_id` (из `sessions.device_id` того
+  логина), `to_name` (alias из личной книги пользователя → любой alias →
+  hostname), `conn_type`, `via`, `actor_source`.
+- Без токена (клиент не вошёл в API, токен отозван logout/disable)
+  событие остаётся с `actor_type=device`. Запасные пути `session`/
+  `book_owner` работают только когда шим знает ID инициатора.
+- Это **запрос** на подключение: установился ли сеанс P2P/relay и сколько
+  он длился, проект не видит (`outcome=unknown`). Требует `SHIM_ENABLED=1`.
+
 ## 8. KX-shim: TCP
 
 ```mermaid
@@ -426,3 +487,9 @@ plaintext `:8080` на один backend. Для production plaintext-блок н
 - Не логировать `K`, `box_sk`, `id_ed25519`, токены и пароли.
 - Не делать `SHIM_UPSTREAM` публичным relay-портом.
 - Не публиковать `data/`, `.env`, `keys/` в git или Docker-образ.
+- Не обновлять и не удалять `audit_events` из обычного кода: это append-only
+  журнал, единственный путь удаления — retention (`cleanup_once`).
+- Не писать в аудит тела запросов, пароли, токены, cookie и приватные ключи;
+  `details` — только явно собранные безопасные поля.
+- Не добавлять строку аудита на каждый heartbeat/sysinfo или повторный 429:
+  это превращает журнал в поток и убивает его ценность.

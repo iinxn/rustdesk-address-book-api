@@ -5,6 +5,7 @@ RustDesk-compatible /api/ab/* is untouched.
 """
 import uuid
 from collections import defaultdict
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
@@ -18,6 +19,7 @@ from app.core.validators import validate_rustdesk_id
 from app.models.models import (
     AddressBook,
     AddressBookEntry,
+    AuditEvent,
     DeviceInfo,
     DiscoveredDevice,
     EntryTag,
@@ -34,6 +36,7 @@ from app.schemas.panel import (
     UserIn,
 )
 from app.services import ab as ab_svc
+from app.services import audit as audit_svc
 from app.services import device_info as info_svc
 from app.services import presence as presence_svc
 from app.services.auth import DISPLAY_NAME_MAX, clean_display_name
@@ -47,6 +50,16 @@ MAX_BULK_TAGS = 20
 
 def err(msg: str, code: int = 400) -> JSONResponse:
     return JSONResponse(status_code=code, content={"detail": msg})
+
+
+def _audit_dt(raw: str) -> datetime | None:
+    """Parse an ISO timestamp for the audit filters; naive UTC internally."""
+    if not raw.strip():
+        return None
+    value = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
 
 
 def user_out(u: User) -> dict:
@@ -223,6 +236,17 @@ def create_book(body: dict, user: User = Depends(current_user), db: Session = De
         return err("missing name", 400)
     b = AddressBook(name=name, type="shared", owner_user_id=user.id)
     db.add(b)
+    db.flush()
+    audit_svc.record(
+        db,
+        category="data",
+        event_type="book.create",
+        actor=user,
+        destination="api",
+        target_type="book",
+        target_id=b.id,
+        details={"name": b.name, "type": b.type},
+    )
     db.commit()
     db.refresh(b)
     return {"id": b.id, "name": b.name, "type": b.type}
@@ -240,7 +264,18 @@ def rename_book(bid: str, body: dict, user: User = Depends(current_user), db: Se
     name = str(body.get("name", "")).strip()
     if not name:
         return err("missing name", 400)
+    old_name = book.name
     book.name = name
+    audit_svc.record(
+        db,
+        category="data",
+        event_type="book.update",
+        actor=user,
+        destination="api",
+        target_type="book",
+        target_id=book.id,
+        details={"fields": audit_svc.diff_fields({"name": old_name}, {"name": name})},
+    )
     db.commit()
     return {"id": book.id, "name": book.name, "type": book.type}
 
@@ -254,6 +289,17 @@ def delete_book(bid: str, user: User = Depends(current_user), db: Session = Depe
         return err("personal address book cannot be deleted", 400)
     if ab_svc.rule_for(db, user, book) < 3:
         return err("full control required", 403)
+    book_name = book.name
+    audit_svc.record(
+        db,
+        category="data",
+        event_type="book.delete",
+        actor=user,
+        destination="api",
+        target_type="book",
+        target_id=book.id,
+        details={"name": book_name},
+    )
     db.delete(book)  # entries, tags and permissions cascade via ORM relationships
     db.commit()
     return {"ok": True}
@@ -347,6 +393,22 @@ def create_entry(bid: str, body: EntryIn, user: User = Depends(current_user), db
     db.add(e)
     db.flush()
     ab_svc.sync_entry_tags(db, e, body.tags)
+    audit_svc.record(
+        db,
+        category="data",
+        event_type="entry.create",
+        actor=user,
+        destination="api",
+        target_type="device",
+        target_id=e.rustdesk_id,
+        details={
+            "entry_id": e.id,
+            "book_id": bid,
+            "alias": e.alias,
+            "tags": body.tags,
+            "password_set": bool(body.password),
+        },
+    )
     db.commit()
     db.refresh(e)
     return entry_out(db, e)
@@ -370,6 +432,8 @@ def update_entry(eid: str, body: EntryIn, user: User = Depends(current_user), db
     book = ab_svc.get_book_for_user(db, user, e.address_book_id)
     if book is None or not ab_svc.can_write(ab_svc.rule_for(db, user, book)):
         return err("read-only", 403)
+    before_tags = ab_svc.entry_tag_names(db, e.id)
+    before = {"alias": e.alias, "rustdesk_id": e.rustdesk_id, "note": e.note}
     e.alias, e.note = body.alias, body.note
     if body.password:
         e.password_encrypted = encrypt_password(body.password)
@@ -381,6 +445,26 @@ def update_entry(eid: str, body: EntryIn, user: User = Depends(current_user), db
             return err("duplicate", 409)
         e.rustdesk_id = body.rustdesk_id
     ab_svc.sync_entry_tags(db, e, body.tags)
+    fields = audit_svc.diff_fields(
+        {"alias": before["alias"], "rustdesk_id": before["rustdesk_id"]},
+        {"alias": e.alias, "rustdesk_id": e.rustdesk_id},
+    )
+    if before["note"] != e.note:
+        fields["note"] = "changed"
+    if before_tags != sorted(body.tags):
+        fields["tags"] = {"from": before_tags, "to": sorted(body.tags)}
+    if body.password:
+        fields["password_changed"] = True
+    audit_svc.record(
+        db,
+        category="data",
+        event_type="entry.update",
+        actor=user,
+        destination="api",
+        target_type="device",
+        target_id=e.rustdesk_id,
+        details={"entry_id": e.id, "book_id": e.address_book_id, "fields": fields},
+    )
     db.commit()
     return entry_out(db, e)
 
@@ -393,6 +477,16 @@ def delete_entry(eid: str, user: User = Depends(current_user), db: Session = Dep
     book = ab_svc.get_book_for_user(db, user, e.address_book_id)
     if book is None or not ab_svc.can_write(ab_svc.rule_for(db, user, book)):
         return err("read-only", 403)
+    audit_svc.record(
+        db,
+        category="data",
+        event_type="entry.delete",
+        actor=user,
+        destination="api",
+        target_type="device",
+        target_id=e.rustdesk_id,
+        details={"entry_id": e.id, "book_id": e.address_book_id, "alias": e.alias},
+    )
     db.delete(e)
     db.commit()
     return {"ok": True}
@@ -428,6 +522,22 @@ def bulk_delete(body: BulkIdsIn, user: User = Depends(current_user), db: Session
             continue
         db.delete(e)
         deleted.append(eid)
+    outcome = "success" if not failed else ("error" if not deleted else "partial")
+    audit_svc.record(
+        db,
+        category="data",
+        event_type="entry.bulk_delete",
+        outcome=outcome,
+        actor=user,
+        destination="api",
+        target_type="device",
+        details={
+            "deleted_count": len(deleted),
+            "failed_count": len(failed),
+            "sample_deleted": deleted[:10],
+            "sample_failed": failed[:10],
+        },
+    )
     try:
         db.commit()
     except Exception:
@@ -466,6 +576,24 @@ def bulk_tags(body: BulkTagsIn, user: User = Depends(current_user), db: Session 
         if add:
             ab_svc.add_entry_tags(db, e, add)
         updated.append(eid)
+    outcome = "success" if not failed else ("error" if not updated else "partial")
+    audit_svc.record(
+        db,
+        category="data",
+        event_type="entry.bulk_tags",
+        outcome=outcome,
+        actor=user,
+        destination="api",
+        target_type="device",
+        details={
+            "updated_count": len(updated),
+            "failed_count": len(failed),
+            "added": add,
+            "removed": remove,
+            "sample_updated": updated[:10],
+            "sample_failed": failed[:10],
+        },
+    )
     try:
         db.commit()
     except Exception:
@@ -495,6 +623,17 @@ def create_tag(bid: str, body: TagIn, user: User = Depends(current_user), db: Se
         return err("duplicate", 409)
     t = Tag(address_book_id=bid, name=body.name, color=body.color)
     db.add(t)
+    db.flush()
+    audit_svc.record(
+        db,
+        category="data",
+        event_type="tag.create",
+        actor=user,
+        destination="api",
+        target_type="tag",
+        target_id=t.id,
+        details={"book_id": bid, "name": t.name, "color": t.color},
+    )
     db.commit()
     db.refresh(t)
     return {"id": t.id, "name": t.name, "color": t.color, "devices": 0}
@@ -510,7 +649,21 @@ def update_tag(tid: str, body: TagIn, user: User = Depends(current_user), db: Se
         return err("read-only", 403)
     if body.name != t.name and db.scalar(select(Tag).where(Tag.address_book_id == t.address_book_id, Tag.name == body.name)):
         return err("duplicate", 409)
+    fields = audit_svc.diff_fields(
+        {"name": t.name, "color": str(t.color)},
+        {"name": body.name, "color": str(body.color)},
+    )
     t.name, t.color = body.name, body.color
+    audit_svc.record(
+        db,
+        category="data",
+        event_type="tag.update",
+        actor=user,
+        destination="api",
+        target_type="tag",
+        target_id=t.id,
+        details={"book_id": t.address_book_id, "fields": fields},
+    )
     db.commit()
     return {"id": t.id, "name": t.name, "color": t.color}
 
@@ -523,6 +676,16 @@ def delete_tag(tid: str, user: User = Depends(current_user), db: Session = Depen
     book = ab_svc.get_book_for_user(db, user, t.address_book_id)
     if book is None or not ab_svc.can_write(ab_svc.rule_for(db, user, book)):
         return err("read-only", 403)
+    audit_svc.record(
+        db,
+        category="data",
+        event_type="tag.delete",
+        actor=user,
+        destination="api",
+        target_type="tag",
+        target_id=t.id,
+        details={"book_id": t.address_book_id, "name": t.name},
+    )
     db.delete(t)
     db.commit()
     return {"ok": True}
@@ -538,6 +701,16 @@ def attach_tag(eid: str, tid: str, user: User = Depends(current_user), db: Sessi
         return err("read-only", 403)
     if db.get(EntryTag, (eid, tid)) is None:
         db.add(EntryTag(entry_id=eid, tag_id=tid))
+        audit_svc.record(
+            db,
+            category="data",
+            event_type="entry.tag_attach",
+            actor=user,
+            destination="api",
+            target_type="device",
+            target_id=e.rustdesk_id,
+            details={"entry_id": e.id, "tag_id": t.id, "tag": t.name},
+        )
         db.commit()
     return {"ok": True}
 
@@ -552,7 +725,18 @@ def detach_tag(eid: str, tid: str, user: User = Depends(current_user), db: Sessi
         return err("read-only", 403)
     r = db.get(EntryTag, (eid, tid))
     if r is not None:
+        t = db.get(Tag, tid)
         db.delete(r)
+        audit_svc.record(
+            db,
+            category="data",
+            event_type="entry.tag_detach",
+            actor=user,
+            destination="api",
+            target_type="device",
+            target_id=e.rustdesk_id,
+            details={"entry_id": e.id, "tag_id": tid, "tag": t.name if t else ""},
+        )
         db.commit()
     return {"ok": True}
 
@@ -653,6 +837,22 @@ def add_discovered(rid: str, body: DiscoveredAddIn,
     db.add(e)
     db.flush()
     ab_svc.sync_entry_tags(db, e, body.tags)
+    audit_svc.record(
+        db,
+        category="data",
+        event_type="entry.create",
+        actor=user,
+        destination="api",
+        target_type="device",
+        target_id=e.rustdesk_id,
+        details={
+            "entry_id": e.id,
+            "book_id": book.id,
+            "alias": e.alias,
+            "tags": body.tags,
+            "source": "discovered",
+        },
+    )
     db.commit()
     db.refresh(e)
     return entry_out(db, e, info)
@@ -740,6 +940,17 @@ def refresh_device_info(rid: str, user: User = Depends(current_user),
     if not user.is_admin and disc is None and not has_entry:
         return err("not found", 404)
     info_svc.request_refresh(rid)
+    audit_svc.record(
+        db,
+        category="device",
+        event_type="device.refresh_request",
+        actor=user,
+        destination="api",
+        target_type="device",
+        target_id=rid,
+        details={"expires_in": info_svc.REFRESH_TTL_SEC},
+    )
+    db.commit()
     return {"ok": True, "expires_in": info_svc.REFRESH_TTL_SEC}
 
 
@@ -755,6 +966,16 @@ def forget_discovered(rid: str, user: User = Depends(current_user),
     row = db.scalar(select(DiscoveredDevice).where(DiscoveredDevice.rustdesk_id == rid))
     if row is None:
         return err("not found", 404)
+    audit_svc.record(
+        db,
+        category="device",
+        event_type="device.forget",
+        actor=user,
+        destination="api",
+        target_type="device",
+        target_id=rid,
+        details={"last_ip": row.last_ip, "source": row.source},
+    )
     db.delete(row)
     db.commit()
     return {"ok": True}
@@ -777,7 +998,22 @@ def create_panel_user(body: UserIn, user: User = Depends(current_user), db: Sess
     if problem:
         return err(problem, 400)
     from app.services.auth import create_user
-    u = create_user(db, body.username, body.password, body.is_admin, body.display_name)
+    u = create_user(db, body.username, body.password, body.is_admin, body.display_name, commit=False)
+    audit_svc.record(
+        db,
+        category="security",
+        event_type="user.create",
+        actor=user,
+        destination="api",
+        target_type="user",
+        target_id=u.id,
+        details={
+            "username": u.username,
+            "display_name": u.display_name,
+            "is_admin": u.is_admin,
+        },
+    )
+    db.commit()
     return user_out(u)
 
 
@@ -789,6 +1025,12 @@ def update_panel_user(uid: str, body: dict, user: User = Depends(current_user), 
     u = db.get(User, uid)
     if u is None:
         return err("not found", 404)
+    before = {
+        "username": u.username,
+        "display_name": u.display_name,
+        "is_admin": str(u.is_admin),
+        "is_disabled": str(u.is_disabled),
+    }
     if "username" in body:
         new_name = str(body["username"]).strip()
         if not new_name:
@@ -817,13 +1059,35 @@ def update_panel_user(uid: str, body: dict, user: User = Depends(current_user), 
         from app.core.security import hash_password
         u.password_hash = hash_password(str(body["password"]))
         revoke_sessions = True
-    db.commit()
+    fields = audit_svc.diff_fields(
+        before,
+        {
+            "username": u.username,
+            "display_name": u.display_name,
+            "is_admin": str(u.is_admin),
+            "is_disabled": str(u.is_disabled),
+        },
+    )
+    if body.get("password"):
+        fields["password_changed"] = True
+    audit_svc.record(
+        db,
+        category="security",
+        event_type="user.update",
+        actor=user,
+        destination="api",
+        target_type="user",
+        target_id=u.id,
+        details={"fields": fields, "sessions_revoked": revoke_sessions},
+    )
     if revoke_sessions:
         # SEC-007: disable and password rotation must kill every live Bearer
         # session of that user, not just the caller's. Panel cookies are
         # already invalidated by the is_disabled check in panel_user (SEC-001).
         from app.services.auth import destroy_user_sessions
-        destroy_user_sessions(db, u.id)
+        destroy_user_sessions(db, u.id)  # commits the audit row too
+    else:
+        db.commit()
     return user_out(u)
 
 
@@ -836,6 +1100,16 @@ def delete_panel_user(uid: str, user: User = Depends(current_user), db: Session 
         return err("not found", 404)
     if u.id == user.id:
         return err("cannot delete self", 400)
+    audit_svc.record(
+        db,
+        category="security",
+        event_type="user.delete",
+        actor=user,
+        destination="api",
+        target_type="user",
+        target_id=u.id,
+        details={"username": u.username, "display_name": u.display_name},
+    )
     db.delete(u)
     db.commit()
     return {"ok": True}
@@ -852,6 +1126,131 @@ def update_me(body: MeIn, user: User = Depends(current_user), db: Session = Depe
     problem = display_name_error(body.display_name)
     if problem:
         return err(problem, 400)
+    old_name = user.display_name
     user.display_name = clean_display_name(body.display_name)
+    audit_svc.record(
+        db,
+        category="security",
+        event_type="user.self_update",
+        actor=user,
+        destination="api",
+        target_type="user",
+        target_id=user.id,
+        details={"fields": audit_svc.diff_fields(
+            {"display_name": old_name}, {"display_name": user.display_name}
+        )},
+    )
     db.commit()
     return user_out(user)
+
+
+# --- audit/access log (admin only) -----------------------------------------
+
+@router.get("/audit/meta")
+def audit_meta(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Filter vocabulary for the UI. Admin-only, like the log itself."""
+    if not user.is_admin:
+        return err("admin required", 403)
+    event_types = list(db.scalars(
+        select(AuditEvent.event_type).distinct().order_by(AuditEvent.event_type)
+    ))
+    target_types = list(db.scalars(
+        select(AuditEvent.target_type).distinct().order_by(AuditEvent.target_type)
+    ))
+    return {
+        "categories": list(audit_svc.CATEGORIES),
+        "outcomes": list(audit_svc.OUTCOMES),
+        "event_types": [v for v in event_types if v],
+        "target_types": [v for v in target_types if v],
+        "retention_days": audit_svc.retention_days(),
+        "enabled": settings.audit_enabled_flag,
+    }
+
+
+@router.get("/audit")
+def list_audit(
+    page: int = 1,
+    page_size: int = 50,
+    sort: str = "desc",
+    category: str = "",
+    event_type: str = "",
+    actor: str = "",
+    source_ip: str = "",
+    target_type: str = "",
+    target_id: str = "",
+    outcome: str = "",
+    search: str = "",
+    since: str = "",
+    until: str = "",
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """Server-side filtered, paginated audit history. Admin only.
+
+    The response never contains raw request bodies or secrets: details were
+    redacted and bounded when the row was written. Unknown fields are returned
+    as empty strings, so the UI can show "unknown" instead of inventing an
+    actor.
+    """
+    if not user.is_admin:
+        return err("admin required", 403)
+    try:
+        since_dt = _audit_dt(since)
+        until_dt = _audit_dt(until)
+    except ValueError:
+        return err("invalid date filter", 400)
+
+    q = select(AuditEvent)
+    if since_dt is not None:
+        q = q.where(AuditEvent.timestamp >= since_dt)
+    if until_dt is not None:
+        q = q.where(AuditEvent.timestamp <= until_dt)
+    if category:
+        q = q.where(AuditEvent.category == category)
+    if event_type:
+        q = q.where(AuditEvent.event_type == event_type)
+    if outcome:
+        q = q.where(AuditEvent.outcome == outcome)
+    if target_type:
+        q = q.where(AuditEvent.target_type == target_type)
+    if target_id.strip():
+        q = q.where(AuditEvent.target_id.like(f"%{target_id.strip()[:128]}%"))
+    if source_ip.strip():
+        q = q.where(AuditEvent.source_ip.like(f"%{source_ip.strip()[:64]}%"))
+    if actor.strip():
+        needle = f"%{actor.strip()[:128]}%"
+        q = q.where(or_(
+            AuditEvent.actor_name.like(needle),
+            AuditEvent.actor_id.like(needle),
+        ))
+    if search.strip():
+        needle = f"%{search.strip()[:128]}%"
+        q = q.where(or_(
+            AuditEvent.id.like(needle),
+            AuditEvent.request_id.like(needle),
+            AuditEvent.route.like(needle),
+            AuditEvent.target_id.like(needle),
+            AuditEvent.actor_name.like(needle),
+        ))
+
+    total = db.scalar(select(func.count()).select_from(q.subquery())) or 0
+    page_size = min(max(page_size, 1), 200)
+    page = max(page, 1)
+    order = AuditEvent.timestamp.asc() if sort == "asc" else AuditEvent.timestamp.desc()
+    rows = list(db.scalars(
+        q.order_by(order, AuditEvent.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ))
+    return {"total": total, "data": [audit_svc.serialize(e) for e in rows]}
+
+
+@router.get("/audit/{eid}")
+def get_audit_event(eid: str, user: User = Depends(current_user),
+                    db: Session = Depends(get_db)):
+    if not user.is_admin:
+        return err("admin required", 403)
+    event = db.get(AuditEvent, eid)
+    if event is None:
+        return err("not found", 404)
+    return audit_svc.serialize(event)

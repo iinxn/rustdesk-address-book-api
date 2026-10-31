@@ -45,7 +45,7 @@
 | Файл | Содержимое | Замечания |
 |---|---|---|
 | `rustdesk.py` | `/api/login`, `/api/currentUser`, `/api/logout`, `/api/login-options`, `/api/ab/*`, `/api/heartbeat`, `/api/sysinfo*`, legacy-заглушки | Контракт клиента. Ошибки `{"error": ...}`. Не добавляй сюда поля панели |
-| `webapi.py` | `/api/v1/*`: stats, books, entries, bulk, tags, discovered, device-info, users | Внутренний API SPA. Ошибки `{"detail": ...}`. Много ручной авторизации |
+| `webapi.py` | `/api/v1/*`: stats, books, entries, bulk, tags, discovered, device-info, users, audit | Внутренний API SPA. Ошибки `{"detail": ...}`. Много ручной авторизации |
 | `panel.py` | `/panel/*`: login/logout, devices, tags, users | Legacy HTML, cookie-сессия; при изменении проверяй CSRF/disable |
 | `deps.py` | `bearer_token`, `current_user`, `optional_user` | Единая проверка Bearer |
 
@@ -70,6 +70,8 @@
 | `device_info.py` | sysinfo (write-once), refresh/approval | `save_sysinfo`, `device_known`, `missing_fields`, `parse_cpu`, `parse_memory`, `parse_os`, `record_heartbeat`, `request_refresh`, `take_refresh`, `take_approval`, `info_out` |
 | `discovery.py` | drain очереди → БД | `reset_online`, `drain_once` (upsert, merge source, stale sweep) |
 | `discovery_events.py` | потокобезопасная очередь | `publish`, `drain`, `qsize`, `dropped_count`; `MAX_EVENTS=20000` |
+| `audit.py` | append-only журнал, редактирование, retention | `record`, `write_event`, `write_events`, `write_access`, `cleanup_once`, `retention_days`, `serialize`, `diff_fields`, `note_rate_limited` |
+| `connections.py` | события «пользователь → устройство» из запросов шима | `token_index`, `token_digest`, `build_event`, `device_label`, `resolve_by_token`, `resolve_user` |
 
 ### `app/core/`
 
@@ -79,14 +81,14 @@
 | `security.py` | bcrypt, `new_token` |
 | `crypto.py` | Fernet для паролей устройств; ephemeral key при пустом `DEVICE_SECRET` (dev) |
 | `validators.py` | `validate_rustdesk_id`: запрет `@ / \ ? & =`, пробелов; regex `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` |
-| `middleware.py` | `client_ip`, `BodyCapMiddleware`, `RateLimitMiddleware`, `heartbeat_allow`, `reset_rate_limits` |
+| `middleware.py` | `client_ip`, `BodyCapMiddleware`, `RateLimitMiddleware`, `AuditMiddleware`, `heartbeat_allow`, `reset_rate_limits` |
 | `logging.py` | `basicConfig`; файлового handler нет |
 
 ### `app/models/`, `app/schemas/`, `app/db/`
 
 | Путь | Содержимое |
 |---|---|
-| `app/models/models.py` | `User`, `Session`, `AddressBook`, `AddressBookEntry`, `Tag`, `EntryTag`, `AddressBookPermission`, `DiscoveredDevice`, `DeviceInfo` |
+| `app/models/models.py` | `User`, `Session`, `AddressBook`, `AddressBookEntry`, `Tag`, `EntryTag`, `AddressBookPermission`, `DiscoveredDevice`, `DeviceInfo`, `AuditEvent` |
 | `app/schemas/rustdesk.py` | `LoginIn`, `UserOut`, `LoginOut`, `PeerOut`, `PeersPage`, `TagOut`, `SharedProfileOut`, `SharedProfilesPage`, `ErrorOut` |
 | `app/schemas/panel.py` | `EntryIn`, `TagIn`, `UserIn`, `BulkIdsIn`, `BulkTagsIn`, `DiscoveredAddIn`, `AddressBookOut`, `EntryOut`, `TagOut`, `UserOut` |
 | `app/db/base.py` | `Base` |
@@ -120,6 +122,8 @@
 | `frontend/src/pages/Books.tsx` | список/создание/переименование/удаление книг |
 | `frontend/src/pages/Tags.tsx` | теги, цвета, переименование, удаление |
 | `frontend/src/pages/Users.tsx` | администрирование пользователей, display name |
+| `frontend/src/pages/Audit.tsx` | admin-only журнал событий: фильтры, пагинация, детали, переход в карточку устройства |
+| `frontend/src/pages/Audit.tsx` | admin-only журнал событий: фильтры, пагинация, детали, переход в карточку устройства |
 | `frontend/src/pages/Login.tsx` | вход, сохранение сессии, брендинг |
 | `frontend/vite.config.ts` | `base: '/app/'`, dev-proxy `/api` → `127.0.0.1:8000` |
 
@@ -135,6 +139,8 @@
 | `alembic/versions/0002_last_seen.py` | `address_book_entries.last_seen` |
 | `alembic/versions/0003_drop_customers.py` | удаляет `customer_id` и `customers` |
 | `alembic/versions/0004_discovery_and_device_info.py` | `discovered_devices`, `device_info` + индексы |
+| `alembic/versions/0005_audit_events.py` | `audit_events` + индексы (аддитивно) |
+| `alembic/versions/0006_session_device_id.py` | `sessions.device_id` + индекс (аддитивно) |
 
 Правила и схема — `docs/project/DATA_MODEL.md`.
 

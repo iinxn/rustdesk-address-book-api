@@ -7,6 +7,7 @@ import Devices from './pages/Devices';
 import Login from './pages/Login';
 import Tags from './pages/Tags';
 import Users from './pages/Users';
+import Audit from './pages/Audit';
 
 function Guard({ children }: { children: React.ReactNode }) {
   return getToken() ? <>{children}</> : <Navigate to="/login" replace />;
@@ -23,6 +24,7 @@ export default function App() {
             <Route path="/books" element={<Guard><Books /></Guard>} />
             <Route path="/tags" element={<Guard><Tags /></Guard>} />
             <Route path="/users" element={<Guard><Users /></Guard>} />
+            <Route path="/audit" element={<Guard><Audit /></Guard>} />
           </Routes>
         </HashRouter>
       </NotificationProvider>

@@ -5,15 +5,21 @@
   per-device bucket plus an aggregate per-IP cap (429 + `Retry-After`).
 """
 import json
+import logging
 import math
+import threading
 import time
 from collections import deque
 
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.core.config import settings
 from app.core.validators import validate_rustdesk_id
+from app.services import audit as audit_svc
+
+log = logging.getLogger("app.access")
 
 WINDOW_SEC = 60.0
 # Heartbeat payloads are tiny (id/uuid/ver). Parse the body in middleware only
@@ -176,6 +182,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             rid = await _heartbeat_id(request)
             allowed, retry = heartbeat_allow(rid, client_ip(request))
             if not allowed:
+                audit_svc.note_rate_limited(
+                    "/api/heartbeat", client_ip(request), retry, audit_it=False
+                )
                 return JSONResponse(
                     status_code=429,
                     content={"error": "rate limited"},
@@ -192,6 +201,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 q = self.hits.setdefault(k, deque())
                 _prune(q, now)
                 if len(q) >= per_min:
+                    audit_svc.note_rate_limited(
+                        prefix, client_ip(request), _retry_after(q, now), audit_it=True
+                    )
                     return _rate_limited(q, now)
                 q.append(now)
                 break
@@ -204,3 +216,175 @@ def rate_limit_rules():
         ("/api/login", ("POST",), "login_per_minute_per_ip"),
         ("/api/sysinfo", ("POST",), "sysinfo_per_minute_per_ip"),
     ]
+
+
+# --- audit/access middleware -------------------------------------------------
+
+# High-volume or explicitly instrumented endpoints. Heartbeats and sysinfo are
+# deliberately absent: they run every ~15 s per device and already have their
+# own state-transition events. The audit reader itself is skipped so browsing
+# the log cannot grow the log.
+_SKIP_AUDIT_PREFIXES = ("/api/heartbeat", "/api/sysinfo", "/api/v1/audit")
+_SKIP_AUDIT_EXACT = {"/api/login-options"}
+# POST endpoints that only read. They are access-logged only when they target a
+# path parameter (e.g. tags of one book) or fail.
+_READ_ONLY_ROUTES = {
+    "/api/currentUser",
+    "/api/ab/settings",
+    "/api/ab/personal",
+    "/api/ab/shared/profiles",
+    "/api/ab/peers",
+    "/api/ab/tags/{guid}",
+    "/api/ab",
+    "/api/device-group/accessible",
+    "/api/users",
+    "/api/peers",
+}
+_MUTATION_METHODS = ("POST", "PUT", "PATCH", "DELETE")
+_READ_DEDUPE: dict[tuple, float] = {}
+_READ_DEDUPE_LOCK = threading.Lock()
+_READ_DEDUPE_MAX = 5000
+
+
+def _bearer(request) -> str:
+    value = request.headers.get("authorization", "")
+    if value.lower().startswith("bearer "):
+        return value[7:].strip()
+    return ""
+
+
+def _read_allowed(key: tuple, window: int) -> bool:
+    """Collapse repeated reads of the same resource (panel polling)."""
+    if window <= 0:
+        return True
+    now = time.monotonic()
+    with _READ_DEDUPE_LOCK:
+        last = _READ_DEDUPE.get(key)
+        if last is not None and now - last < window:
+            return False
+        _READ_DEDUPE[key] = now
+        if len(_READ_DEDUPE) > _READ_DEDUPE_MAX:
+            for k, ts in list(_READ_DEDUPE.items()):
+                if now - ts >= window:
+                    _READ_DEDUPE.pop(k, None)
+    return True
+
+
+def _audit_significant(method: str, route: str, path: str, status: int, params: dict) -> bool:
+    if not path.startswith("/api/"):
+        return False
+    if path in _SKIP_AUDIT_EXACT or path.startswith(_SKIP_AUDIT_PREFIXES):
+        return False
+    # Login/logout have explicit auth events; a validation failure (422) still
+    # reaches the access log through the status check below.
+    if path in ("/api/login", "/api/logout") and status in (200, 401):
+        return False
+    # 429 is already written once per route/IP/window by the rate limiter
+    # (`note_rate_limited`); a second row here would double every throttled
+    # request and defeat the storm protection.
+    if status == 429:
+        return False
+    if status in (401, 403, 413) or status >= 500:
+        return True
+    if method in _MUTATION_METHODS and route not in _READ_ONLY_ROUTES:
+        return True
+    if method in ("GET", "POST") and params:
+        return True
+    return False
+
+
+def _audit_params(request) -> dict:
+    """Path params plus only the query keys that identify a resource.
+
+    Query strings may contain arbitrary user data; the audit log must not
+    become a copy of them. `ab`/`book` are the RustDesk address-book selectors
+    and `rid` is a device id, so those are safe to use as targets.
+    """
+    params = dict(request.scope.get("path_params") or {})
+    for key in ("ab", "book", "rid"):
+        value = request.query_params.get(key)
+        if value and key not in params:
+            params[key] = value
+    return params
+
+
+class AuditMiddleware(BaseHTTPMiddleware):
+    """Request id + source IP context and a bounded access/security history.
+
+    It does not log every request. Only mutations, failures/denials and reads
+    of a specific resource are stored; repeated reads of the same resource by
+    the same actor are collapsed (`AUDIT_READ_DEDUPE_SEC`). Technical output
+    stays on stdout/stderr and is not duplicated into SQLite.
+    """
+
+    async def dispatch(self, request, call_next):
+        started = time.perf_counter()
+        path = request.url.path
+        source_ip = client_ip(request)
+        token = _bearer(request)
+        request_id = audit_svc.new_request_id()
+        destination = "panel" if path.startswith("/panel") else "api"
+        ctx_token = audit_svc.set_request_context(
+            audit_svc.RequestContext(
+                request_id=request_id,
+                source_ip=source_ip,
+                destination=destination,
+                http_method=request.method,
+                route=path,
+            )
+        )
+        status = 500
+        response = None
+        try:
+            try:
+                response = await call_next(request)
+                status = response.status_code
+            except Exception:
+                log.exception(
+                    "unhandled error request_id=%s method=%s path=%s",
+                    request_id, request.method, path,
+                )
+                raise
+            finally:
+                duration_ms = int((time.perf_counter() - started) * 1000)
+                route = getattr(request.scope.get("route"), "path", None) or path
+                params = _audit_params(request)
+                if response is not None:
+                    response.headers["X-Request-ID"] = request_id
+                if _audit_significant(request.method, route, path, status, params):
+                    is_mutation = (
+                        request.method in _MUTATION_METHODS
+                        and route not in _READ_ONLY_ROUTES
+                    )
+                    should_write = True
+                    if not is_mutation and status < 400:
+                        target_type, target_id = audit_svc.target_from_params(params)
+                        actor_key = token or f"ip:{source_ip}"
+                        should_write = _read_allowed(
+                            (actor_key, request.method, route, target_type, target_id),
+                            settings.audit_read_dedupe_sec,
+                        )
+                    if should_write:
+                        await run_in_threadpool(
+                            audit_svc.write_access,
+                            method=request.method,
+                            route=route,
+                            path=path,
+                            status_code=status,
+                            duration_ms=duration_ms,
+                            request_id=request_id,
+                            source_ip=source_ip,
+                            token=token,
+                            params=params,
+                        )
+                if (
+                    settings.audit_slow_request_ms > 0
+                    and duration_ms >= settings.audit_slow_request_ms
+                ):
+                    log.warning(
+                        "slow request request_id=%s method=%s route=%s status=%s duration_ms=%d",
+                        request_id, request.method, route, status, duration_ms,
+                    )
+        finally:
+            audit_svc.reset_request_context(ctx_token)
+        return response

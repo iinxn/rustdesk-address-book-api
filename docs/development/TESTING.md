@@ -2,8 +2,8 @@
 
 ## 1. Фактическое состояние
 
-Автотесты есть для heartbeat rate limiting, sysinfo write-once и
-`display_name`; полного покрытия нет.
+Автотесты есть для heartbeat rate limiting, sysinfo write-once,
+`display_name` и audit log; полного покрытия нет.
 
 - `tests/test_heartbeat_rate_limit.py` — обычный heartbeat, 800 устройств за
   одним IP, независимые bucket'ы, реальное превышение лимита, повторные
@@ -18,6 +18,22 @@
   `display_name`, правка админом и через `/api/v1/me`, отдача значения в
   `/api/login`/`/api/currentUser`, запрет правки чужого профиля, валидация
   длины/типа, схлопывание пробелов, пустое значение.
+- `tests/test_audit.py` — запись access-строк с `X-Request-ID`, неудачный
+  login без секретов, бизнес-события create/update/delete в одной
+  транзакции, безопасные diff-поля (`password_changed`, без пароля/заметки),
+  отменённая операция не даёт success, анонимный клиент не приписан
+  пользователю, heartbeat не растёт от 10 запросов, повторные 429
+  троттлятся, фильтры/пагинация, admin-only доступ, retention удаляет
+  старое и оставляет свежее, миграция `0004→head` на БД с данными и
+  downgrade, 20 параллельных записей без потерь и перепутанных
+  `request_id`.
+- `tests/test_connections.py` — журнал подключений: парсер шима отдаёт
+  SHA-256 токена, а не токен; настоящий `PunchHoleRequest` с токеном
+  залогиненного пользователя → строка `connection.request` с его именем,
+  alias цели из книги (или hostname из sysinfo) и ID инициатора из логина;
+  токен/хеш не попадают в строку; без токена и после logout — неопознанный
+  клиент; повторы и relay-fallback схлопываются, разные пользователи и типы
+  подключения — отдельные строки; фильтр `category=connection` в API.
 - `tests/conftest.py` поднимает временную SQLite и применяет Alembic
   `upgrade head`; `data/` не используется.
 - `pytest`/`httpx` вынесены в `requirements-dev.txt`, не в runtime.
@@ -287,10 +303,20 @@ curl -s "$BASE/api/v1/device-info/123456789" -H "$AUTH"
 - bulk-tags: add/remove, лимит 20 имён, частичный успех;
 - discovered: `only_unlinked`, `status`, поиск по IP/hostname/username/os;
 - device-info: `sources`, `entries[].book_id/book_name`, `online` — union
-  discovery и presence; не-админ без записи/динскавери → `404`;
+  discovery и presence; не-админ без записи/discovery → `404`;
 - refresh: `{"ok":true,"expires_in":1800}`, следующий heartbeat →
   `{"sysinfo":true}` один раз;
-- users: не-админ → `403`; нельзя demote/disable/delete себя.
+- users: не-админ → `403`; нельзя demote/disable/delete себя;
+- audit: не-админ → `403`, admin → `200`; после PUT/DELETE устройства в
+  журнале есть строка с тем же `request_id`, что и `X-Request-ID` ответа;
+  фильтры `category`/`event_type`/`actor`/`source_ip`/`target_id`/`since`
+  сужают выборку; `page_size=100000` → ≤200; heartbeat и повторный 429 не
+  добавляют по строке на запрос; `/audit` в SPA виден только админу, детали
+  открываются, ссылка «Открыть карточку устройства» ведёт на нужный ID.
+- подключения (нужен `SHIM_ENABLED=1` и клиент, вошедший в API): клиент A
+  подключается к B → в `/audit`, категория «Подключения», строка
+  «<логин> запросил(а) подключение к <alias> (<ID>)»; клиент без входа —
+  «Неопознанный клиент»; в логах шима и в `details` нет токена.
 
 ### 4.9. Legacy-панель
 
@@ -398,5 +424,6 @@ PY
   (`RUN_LOAD_TESTS=1`), не выдавая синтетику за production-замер.
 
 Текущий набор — `tests/test_heartbeat_rate_limit.py`,
-`tests/test_sysinfo_upload.py` и `tests/test_users_display_name.py`; расширяй
-их и добавляй новые файлы, сохраняя изоляцию БД и детерминизм лимитов.
+`tests/test_sysinfo_upload.py`, `tests/test_users_display_name.py` и
+`tests/test_audit.py`; расширяй их и добавляй новые файлы, сохраняя изоляцию
+БД и детерминизм лимитов.

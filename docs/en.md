@@ -144,7 +144,7 @@ flowchart LR
     C -->|TCP+UDP 21116<br/>KX/secure, plain, datagrams| SHIM[KX shim<br/>supervised thread]
     SHIM -->|decrypted protobuf<br/>SHIM_UPSTREAM| HBBS[real hbbs rendezvous]
     C -->|/app/ :8000| SPA[Web Panel dist/]
-    API -->|SQLAlchemy 2.x<br/>FK ON, busy_timeout 5000| DB[(SQLite data/base.db<br/>Alembic 0001-0004)]
+    API -->|SQLAlchemy 2.x<br/>FK ON, busy_timeout 5000| DB[(SQLite data/base.db<br/>Alembic 0001-0006)]
 ```
 
 Request flow: `POST /api/login` → opaque server-side token (`sessions`,
@@ -203,6 +203,8 @@ commit real values.
 | `DISCOVERY_ONLINE_SEC` | `180` | int | Mark silent discovered devices offline after this many seconds |
 | `TRUSTED_PROXIES` | empty | comma-separated IPs | Trust `X-Forwarded-For` from these peers for rate-limit keying; empty = never trust it |
 | `EXPOSE_DOCS` | `0` | `0`/`1` | Serve `/docs`, `/redoc`, `/openapi.json` (auto-on in `DEV_MODE`; off in prod) |
+| `AUDIT_ENABLED` | `1` | `0`/`1` | Persistent audit log; `0` disables writes and returns an empty log |
+| `AUDIT_RETENTION_DAYS` | `90` | int, clamped 30…90 | Delete audit rows older than this; daily bounded cleanup |
 
 API↔shim wiring is exactly: `SHIM_LISTEN` (where clients connect),
 `SHIM_UPSTREAM` (where the real hbbs listens), `SHIM_ID_KEY` (what the shim

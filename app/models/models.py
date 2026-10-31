@@ -9,6 +9,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -51,6 +52,11 @@ class Session(Base):
     token: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # RustDesk device id reported by the client in `/api/login` (`id`). It is
+    # the same id the client registers on rendezvous, so a connection event can
+    # be attributed to the last user who authenticated from that device.
+    # Empty for browser/panel sessions and for rows created before 0006.
+    device_id: Mapped[str] = mapped_column(String(64), default="", index=True)
 
     user: Mapped[User] = relationship(back_populates="sessions")
 
@@ -179,3 +185,39 @@ class DeviceInfo(Base):
     ip: Mapped[str] = mapped_column(String(64), default="")
     collected_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class AuditEvent(Base):
+    """Append-only audit/access history (see services/audit.py).
+
+    Every field is deliberately bounded at write time: SQLite does not enforce
+    `String(n)`, and the log must not become a place where a large request body
+    or a secret accidentally survives. `details` is redacted JSON, capped at
+    4 KiB. Rows are deleted only by the retention job; normal API code never
+    updates or removes them.
+    """
+    __tablename__ = "audit_events"
+    __table_args__ = (
+        Index("ix_audit_events_target", "target_type", "target_id"),
+        Index("ix_audit_events_category_time", "category", "timestamp"),
+        Index("ix_audit_events_type_time", "event_type", "timestamp"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    category: Mapped[str] = mapped_column(String(16), index=True)
+    event_type: Mapped[str] = mapped_column(String(48), index=True)
+    actor_type: Mapped[str] = mapped_column(String(16), index=True)
+    actor_id: Mapped[str] = mapped_column(String(64), default="", index=True)
+    actor_name: Mapped[str] = mapped_column(String(128), default="")
+    source_ip: Mapped[str] = mapped_column(String(64), default="", index=True)
+    destination: Mapped[str] = mapped_column(String(32), default="")
+    http_method: Mapped[str] = mapped_column(String(8), default="")
+    route: Mapped[str] = mapped_column(String(255), default="")
+    target_type: Mapped[str] = mapped_column(String(32), default="")
+    target_id: Mapped[str] = mapped_column(String(128), default="")
+    outcome: Mapped[str] = mapped_column(String(16), default="success", index=True)
+    status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    request_id: Mapped[str] = mapped_column(String(36), default="", index=True)
+    details: Mapped[str] = mapped_column(Text, default="{}")

@@ -28,6 +28,7 @@ def create_user(
     password: str,
     is_admin: bool = False,
     display_name: str = "",
+    commit: bool = True,
 ) -> User:
     user = User(
         username=username,
@@ -39,8 +40,11 @@ def create_user(
     db.flush()
     # every user gets a personal address book (guid = book id)
     db.add(AddressBook(name="My address book", type="personal", owner_user_id=user.id))
-    db.commit()
-    db.refresh(user)
+    if commit:
+        db.commit()
+        db.refresh(user)
+    else:
+        db.flush()
     return user
 
 
@@ -53,12 +57,17 @@ def authenticate(db: Session, username: str, password: str) -> User | None:
     return user
 
 
-def create_session(db: Session, user: User) -> SessionModel:
+def create_session(db: Session, user: User, device_id: str = "") -> SessionModel:
     purge_expired_sessions(db)  # keep the table from growing (SEC-007/019)
     expires = None
     if settings.session_days > 0:
         expires = datetime.utcnow() + timedelta(days=settings.session_days)
-    s = SessionModel(user_id=user.id, token=new_token(), expires_at=expires)
+    s = SessionModel(
+        user_id=user.id,
+        token=new_token(),
+        expires_at=expires,
+        device_id=(device_id or "").strip()[:64],
+    )
     db.add(s)
     db.commit()
     db.refresh(s)

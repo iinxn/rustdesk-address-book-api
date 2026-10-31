@@ -11,8 +11,14 @@ from app.api import panel, rustdesk, webapi
 from app.api.panel import _LoginRedirect
 from app.core import logging as _logging  # noqa: F401
 from app.core.config import settings
-from app.core.middleware import BodyCapMiddleware, RateLimitMiddleware, rate_limit_rules
+from app.core.middleware import (
+    AuditMiddleware,
+    BodyCapMiddleware,
+    RateLimitMiddleware,
+    rate_limit_rules,
+)
 from app.db.session import SessionLocal
+from app.services import audit as audit_svc
 from app.services import discovery as discovery_svc
 from app.shim_supervisor import ShimSupervisor
 
@@ -36,6 +42,7 @@ async def lifespan(app: FastAPI):
     global supervisor
     monitor_task = None
     discovery_task = None
+    audit_task = None
     # No TCP connection from a previous process can still be alive.
     if settings.discovery_enabled == "1":
         try:
@@ -43,6 +50,32 @@ async def lifespan(app: FastAPI):
                 discovery_svc.reset_online(db)
         except Exception as e:
             log.warning("discovery reset failed: %r", e)
+
+    if settings.audit_enabled_flag:
+        audit_svc.write_event(
+            category="system",
+            event_type="system.startup",
+            outcome="success",
+            actor_type="system",
+            destination="system",
+            details={"retention_days": audit_svc.retention_days()},
+        )
+
+        async def _audit_loop():
+            # First run soon after start, then daily. cleanup_once() has its own
+            # non-blocking lock, so a manual run or a second process cannot
+            # delete the same rows concurrently.
+            await asyncio.sleep(max(0, settings.audit_cleanup_initial_delay_sec))
+            while True:
+                try:
+                    await asyncio.to_thread(audit_svc.cleanup_once)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:  # cleanup_once already logs; keep loop alive
+                    log.warning("audit cleanup loop failed: %r", e)
+                await asyncio.sleep(max(60, settings.audit_cleanup_interval_sec))
+
+        audit_task = asyncio.create_task(_audit_loop())
 
     if settings.shim_enabled == "1":
         host, _port = settings.shim_listen.rsplit(":", 1)
@@ -82,6 +115,16 @@ async def lifespan(app: FastAPI):
         monitor_task.cancel()
     if discovery_task is not None:
         discovery_task.cancel()
+    if audit_task is not None:
+        audit_task.cancel()
+    if settings.audit_enabled_flag:
+        audit_svc.write_event(
+            category="system",
+            event_type="system.shutdown",
+            outcome="success",
+            actor_type="system",
+            destination="system",
+        )
     if supervisor is not None:
         supervisor.stop(timeout=10)
 
@@ -100,6 +143,8 @@ app.add_middleware(BodyCapMiddleware)
 app.add_middleware(RateLimitMiddleware, rules=rate_limit_rules())
 app.add_middleware(SessionMiddleware, secret_key=settings.web_secret,
                    same_site="lax", https_only=False)
+# Outermost: it assigns the request id and sees rate-limit/body-cap responses.
+app.add_middleware(AuditMiddleware)
 app.include_router(rustdesk.router)
 app.include_router(webapi.router)
 app.include_router(panel.router)

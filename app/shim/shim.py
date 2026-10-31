@@ -164,27 +164,102 @@ class Gate:
 #
 # The shim sees the sender's *own* ID only in RegisterPk/RegisterPeer. Other
 # messages (PunchHoleRequest, RequestRelay) carry the *target* ID and must
-# never be attributed to the sender.
+# never be attributed to the sender. A connection event is therefore built
+# only from a target id seen on a connection that already identified its own
+# id, and the two ids stay separate.
+#
+# Who asked: the stock client puts its API `access_token` (issued by our
+# `/api/login`) into PunchHoleRequest/RequestRelay.token whenever it is logged
+# in (client.rs/_start_inner; that also forces the secure KX path). The shim
+# never forwards the token itself: only its SHA-256 leaves this thread, and the
+# API resolves it against `sessions.token`. The digest is not stored either.
 
-def _sender_id(payload: bytes) -> str | None:
+CONN_TYPE_NAMES = {
+    0: "DEFAULT_CONN",
+    1: "FILE_TRANSFER",
+    2: "PORT_FORWARD",
+    3: "RDP",
+    4: "VIEW_CAMERA",
+    5: "TERMINAL",
+}
+# RustDesk retries punch requests and falls back to RequestRelay within one
+# attempt. One audit row per (initiator, token, target, connection type) per
+# window is enough; the first request kind is kept as `via`.
+CONNECTION_DEDUPE_SEC = float(os.environ.get("DISCOVERY_CONNECTION_DEDUPE_SEC", "60"))
+_CONN_LAST: dict[tuple[str, str, str, str], float] = {}
+_CONN_MAX_KEYS = 5000
+
+
+def _parse_control(payload: bytes) -> dict | None:
+    """Classify a small rendezvous control frame.
+
+    Returns `{"sender_id": ...}` for RegisterPeer/RegisterPk or
+    `{"target_id": ..., "via": ..., "conn_type": ..., "token_hash": ...}` for
+    PunchHoleRequest/RequestRelay. Never returns raw bytes, tokens or key
+    material: `token_hash` is the SHA-256 hex of the API token ("" if none).
+    """
     if not payload or len(payload) > DISCOVERY_MAX_PARSE:
         return None
     try:
         m = rz.RendezvousMessage()
         m.ParseFromString(payload)
         kind = m.WhichOneof("union")
-        if kind == "register_peer":
-            rid = m.register_peer.id
-        elif kind == "register_pk":
-            rid = m.register_pk.id
+        if kind in ("register_peer", "register_pk"):
+            rid = (getattr(m, kind).id or "").strip()
+            if validate_rustdesk_id(rid) is not None:
+                return None
+            return {"kind": kind, "sender_id": rid}
+        if kind == "punch_hole_request":
+            req = m.punch_hole_request
+            via = "direct"
+        elif kind == "request_relay":
+            req = m.request_relay
+            via = "relay"
         else:
             return None
-        rid = (rid or "").strip()
-        if validate_rustdesk_id(rid) is not None:
+        target = (req.id or "").strip()
+        if validate_rustdesk_id(target) is not None:
             return None
-        return rid
+        token = req.token or ""
+        return {
+            "kind": kind,
+            "target_id": target,
+            "via": via,
+            "conn_type": CONN_TYPE_NAMES.get(int(req.conn_type), ""),
+            "token_hash": _token_hash(token) if 0 < len(token) <= 512 else "",
+        }
     except Exception:
         return None
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8", "replace")).hexdigest()
+
+
+def _sender_id(payload: bytes) -> str | None:
+    info = _parse_control(payload)
+    return info.get("sender_id") if info else None
+
+
+def _publish_connection(from_id: str, target_id: str, ip: str, via: str,
+                        conn_type: str, token_hash: str = "") -> bool:
+    """Publish one connection attempt, collapsed over the dedupe window."""
+    if CONNECTION_DEDUPE_SEC > 0:
+        now = time.monotonic()
+        key = (from_id, token_hash, target_id, conn_type)
+        last = _CONN_LAST.get(key)
+        if last is not None and now - last < CONNECTION_DEDUPE_SEC:
+            return False
+        _CONN_LAST[key] = now
+        if len(_CONN_LAST) > _CONN_MAX_KEYS:
+            for k, ts in list(_CONN_LAST.items()):
+                if now - ts >= CONNECTION_DEDUPE_SEC:
+                    _CONN_LAST.pop(k, None)
+    return _publish_discovery(
+        "connection", target_id, ip, "tcp",
+        extra={"from_id": from_id, "via": via, "conn_type": conn_type,
+               "token_hash": token_hash},
+    )
 
 
 class _DiscoveryGuard:
@@ -243,7 +318,15 @@ class _ConnTracker:
         self.closed = False
 
     def observe(self, payload: bytes) -> None:
-        rid = _sender_id(payload)
+        info = _parse_control(payload)
+        if info is None:
+            if self.ids:
+                # Keepalive/other frame on an identified connection: still alive.
+                for known in self.ids:
+                    _publish_discovery("seen", known, self.ip, "tcp")
+            return
+
+        rid = info.get("sender_id")
         if rid is not None:
             if rid not in self.ids:
                 if not _GUARD.admit(self.ip, rid):
@@ -257,10 +340,22 @@ class _ConnTracker:
                                    rid, self.ip, "tcp")
             else:
                 _publish_discovery("seen", rid, self.ip, "tcp")
-        elif self.ids:
-            # Keepalive/other frame on an identified connection: still alive.
-            for known in self.ids:
-                _publish_discovery("seen", known, self.ip, "tcp")
+            return
+
+        target = info.get("target_id")
+        if not target:
+            return
+        # A connection attempt is only meaningful with the initiator's own id,
+        # which this connection learned from RegisterPeer/RegisterPk. When the
+        # client has not identified itself yet, record the target with an
+        # unknown initiator instead of guessing.
+        senders = self.ids or {""}
+        for sender in senders:
+            _publish_connection(
+                sender, target, self.ip,
+                info.get("via", ""), info.get("conn_type", ""),
+                info.get("token_hash", ""),
+            )
 
     def close(self) -> None:
         if self.closed:

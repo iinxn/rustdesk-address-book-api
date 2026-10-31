@@ -90,6 +90,7 @@ export function Layout({ children, onTheme, dark }: { children: React.ReactNode;
           <NavLink to="/books" className={navClass}>{t('nav.books')}</NavLink>
           <NavLink to="/tags" className={navClass}>{t('nav.tags')}</NavLink>
           {u?.isAdmin && <NavLink to="/users" className={navClass}>{t('nav.users')}</NavLink>}
+          {u?.isAdmin && <NavLink to="/audit" className={navClass}>{t('nav.audit')}</NavLink>}
         </nav>
         <div className="mt-auto space-y-1 pt-6 text-[11px] text-slate-500 dark:text-slate-400">
           <div>{t('shell.selfHosted')}</div>
@@ -143,6 +144,7 @@ export function Layout({ children, onTheme, dark }: { children: React.ReactNode;
           <NavLink to="/books" className={mobileNavClass}>{t('nav.books')}</NavLink>
           <NavLink to="/tags" className={mobileNavClass}>{t('nav.tags')}</NavLink>
           {u?.isAdmin && <NavLink to="/users" className={mobileNavClass}>{t('nav.users')}</NavLink>}
+          {u?.isAdmin && <NavLink to="/audit" className={mobileNavClass}>{t('nav.audit')}</NavLink>}
         </nav>
       </div>
       {profileOpen && <ProfileDialog initial={u?.displayName || ''} onClose={() => setProfileOpen(false)} />}

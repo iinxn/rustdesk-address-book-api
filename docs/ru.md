@@ -143,7 +143,7 @@ flowchart LR
     C -->|TCP+UDP 21116<br/>KX/secure, plain, дейтаграммы| SHIM[KX shim<br/>поток под надзором]
     SHIM -->|расшифрованный protobuf<br/>SHIM_UPSTREAM| HBBS[настоящий hbbs rendezvous]
     C -->|/app/ :8000| SPA[Web Panel dist/]
-    API -->|SQLAlchemy 2.x<br/>FK ON, busy_timeout 5000| DB[(SQLite data/base.db<br/>Alembic 0001-0004)]
+    API -->|SQLAlchemy 2.x<br/>FK ON, busy_timeout 5000| DB[(SQLite data/base.db<br/>Alembic 0001-0006)]
 ```
 
 Путь запроса: `POST /api/login` → opaque серверный токен (`sessions`, срок
@@ -201,6 +201,8 @@ per-IP лимитов. hbbs доверен в части punch/relay-медиа�
 | `DISCOVERY_ONLINE_SEC` | `180` | int | Помечать молчащее обнаруженное устройство offline |
 | `TRUSTED_PROXIES` | пусто | список IP через запятую | Доверять `X-Forwarded-For` от этих пиров для ключа лимитов; пусто = не доверять вовсе |
 | `EXPOSE_DOCS` | `0` | `0`/`1` | Отдавать `/docs`, `/redoc`, `/openapi.json` (авто-вкл в `DEV_MODE`; в проде выкл) |
+| `AUDIT_ENABLED` | `1` | `0`/`1` | Постоянный журнал событий; `0` отключает запись и отдаёт пустой журнал |
+| `AUDIT_RETENTION_DAYS` | `90` | int, clamp 30…90 | Удалять строки старше срока; ежедневная ограниченная очистка |
 
 Связка API↔shim — это ровно: `SHIM_LISTEN` (куда идут клиенты),
 `SHIM_UPSTREAM` (где слушает настоящий hbbs), `SHIM_ID_KEY` (чем шим
@@ -340,7 +342,7 @@ dev-сервер фронта (`npm run dev`) проксирует `/api` на `
 Состав: `app/` (FastAPI: `main.py`, `__main__.py`, `api/`, `core/`, `models/`,
 `schemas/`, `services/`, `db/`, `cli.py`, `shim/`, `shim_supervisor.py`,
 `web/templates/`), `frontend/` (`src/`, собранный `dist/`), `alembic/`
-(0001–0004), `scripts/` (`start.sh`/`stop.sh` + …),
+(0001–0006), `scripts/` (`start.sh`/`stop.sh` + …),
 `config/` (примеры Caddy/systemd), `data/` + `logs/` (рантайм).
 
 ## 9. Troubleshooting
