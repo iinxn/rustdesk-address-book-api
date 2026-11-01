@@ -277,7 +277,9 @@ PY
 ## 9. Обслуживание
 
 ```bash
-# backup SQLite (integrity_check + mode 600)
+# backup SQLite (integrity_check + mode 600). БД в режиме WAL: рядом лежат
+# <db>-wal и <db>-shm; копировать один файл БД при работающем процессе нельзя,
+# только через эту команду (SQLite Backup API).
 .venv/bin/python -m app.cli backup
 .venv/bin/python -m app.cli backup --dest /safe/base-$(date +%F).db
 

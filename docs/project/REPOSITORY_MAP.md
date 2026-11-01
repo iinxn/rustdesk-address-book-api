@@ -23,7 +23,7 @@
 | `README.md`, `docs/ru.md`, `docs/en.md` | публичная документация и быстрый старт |
 | `TODO.md` | состояние разработки, следующие задачи, долг, блокеры |
 | `docs/project/`, `docs/development/`, `docs/knowledge/` | внутренняя документация для разработки/агентов |
-| `.opencode/skills/` | Skills: `project-debugging`, `sqlite-changes` |
+| `.opencode/skills/` | Skills: `project-debugging`, `sqlite-changes` (локально, в `.gitignore`) |
 | `SECURITY_AUDIT.md` | исторический аудит SEC-001…SEC-020 (не в git) |
 
 ## 2. Точки входа
@@ -44,33 +44,28 @@
 
 | Файл | Содержимое | Замечания |
 |---|---|---|
-| `rustdesk.py` | `/api/login`, `/api/currentUser`, `/api/logout`, `/api/login-options`, `/api/ab/*`, `/api/heartbeat`, `/api/sysinfo*`, legacy-заглушки | Контракт клиента. Ошибки `{"error": ...}`. Не добавляй сюда поля панели |
-| `webapi.py` | `/api/v1/*`: stats, books, entries, bulk, tags, discovered, device-info, users, audit | Внутренний API SPA. Ошибки `{"detail": ...}`. Много ручной авторизации |
-| `panel.py` | `/panel/*`: login/logout, devices, tags, users | Legacy HTML, cookie-сессия; при изменении проверяй CSRF/disable |
-| `deps.py` | `bearer_token`, `current_user`, `optional_user` | Единая проверка Bearer |
-
-Ключевые функции `webapi.py`:
-
-- `books_visible()` — admin видит все книги, остальные — свои + shared по
-  permission;
-- `entry_out()` — расширенное представление устройства (presence, tags,
-  tag_objs, sysinfo-fallback, timestamps);
-- `_dedupe_ids()` / `_clean_tag_names()` — лимиты bulk;
-- `_books_for_rids()` — какие видимые книги содержат ID (один запрос);
-- `_discovered_out()` — форма discovered + `in_books` + `info`;
-- `_book_counts()` — счётчики presence для книги.
+| `rustdesk.py` | `/api/login`, `/api/currentUser`, `/api/logout`, `/api/login-options`, `/api/ab/*`, `/api/heartbeat`, `/api/sysinfo*`, legacy-заглушки | Контракт клиента. Ошибки `{"error": ...}` через `ClientError`. Роуты с SQLite — `def` (threadpool); `async` только login/heartbeat/sysinfo |
+| `v1/__init__.py` | собирает роутеры `/api/v1/*` | Внутренний API SPA. Ошибки `{"detail": ...}` через `PanelError` |
+| `v1/books.py` | stats, книги, entries (листинг/CRUD), bulk-delete/bulk-tags, теги, attach/detach | листинг: SQL-поиск + фильтры/сортировка в памяти, постоянное число запросов |
+| `v1/devices.py` | discovered, add-from-discovered, device-info (сводная карточка), refresh, forget | видимость книг — `ab.visible_books()` |
+| `v1/users.py` | users CRUD (admin), `/me` | смена пароля/disable → `destroy_user_sessions` |
+| `v1/audit.py` | `/audit/meta`, `/audit`, `/audit/{id}` (admin) | фильтры только через белый список колонок |
+| `v1/common.py` | `PREFIX`, `book_or_404`, `writable_or_403`, `entry_for_write`, `entry_out`, `discovered_out`, `user_out`, `page_window`, `record` | общие проверки и сериализаторы `/api/v1` |
+| `panel.py` | `/panel/*`: login/logout, devices, tags, users | Legacy HTML; cookie несёт только `sid`; `?book=` проверяется через `book_access` |
+| `deps.py` | `bearer_token`, `current_user`, `json_body` (+`BAD_JSON`) | `json_body` — async-чтение тела для `def`-роутов |
+| `errors.py` | `ApiError`, `ClientError`, `PanelError`, `install()` | исключение → ответ нужной формы |
 
 ### `app/services/`
 
 | Файл | Ответственность | Основные функции |
 |---|---|---|
-| `ab.py` | книги, права, peers, теги | `personal_book`, `get_book_for_user`, `rule_for`, `can_write`, `shared_profiles`, `peer_out`, `sync_entry_tags`, `add_entry_tags`, `remove_entry_tags`, `apply_peer_update`, `tag_usage` |
-| `auth.py` | пользователи и opaque-сессии | `create_user` (создаёт личную книгу, принимает `display_name`), `clean_display_name`, `authenticate`, `create_session`, `destroy_user_sessions`, `purge_expired_sessions`, `user_by_token`, `destroy_session` |
-| `presence.py` | presence по heartbeat | `record_heartbeat`, `status_of`; `HEARTBEAT_SEC=15`, `ONLINE_AFTER_SEC=45` |
-| `device_info.py` | sysinfo (write-once), refresh/approval | `save_sysinfo`, `device_known`, `missing_fields`, `parse_cpu`, `parse_memory`, `parse_os`, `record_heartbeat`, `request_refresh`, `take_refresh`, `take_approval`, `info_out` |
-| `discovery.py` | drain очереди → БД | `reset_online`, `drain_once` (upsert, merge source, stale sweep) |
-| `discovery_events.py` | потокобезопасная очередь | `publish`, `drain`, `qsize`, `dropped_count`; `MAX_EVENTS=20000` |
-| `audit.py` | append-only журнал, редактирование, retention | `record`, `write_event`, `write_events`, `write_access`, `cleanup_once`, `retention_days`, `serialize`, `diff_fields`, `note_rate_limited` |
+| `ab.py` | книги, права, записи, теги (единственная точка правил доступа) | `book_access`, `writable_book`, `visible_books`, `shared_profiles`, `BookAccess`, `can_write`, `book_counts`, `add_entry`/`rename_entry`/`find_entry` (+`EntryError`), `tags_by_entry`, `set_entry_tags`, `change_tags`, `clean_tag_names`, `parse_color`, `peer_out`, `peers_page`, `apply_peer_update`, `tag_usage` |
+| `auth.py` | пользователи, проверка паролей, opaque-сессии | `create_user`, `set_password`, `authenticate`/`authenticate_async` (+`AuthBusy`), `create_session`, `user_by_token`, `peek_user_by_token` (read-only), `panel_session`, `session_expired`, `destroy_session`, `destroy_user_sessions`, `purge_expired_sessions` |
+| `presence.py` | presence по heartbeat | `HeartbeatWriter` (групповой commit), `status_of`; `ONLINE_AFTER_SEC=45` |
+| `device_info.py` | sysinfo (write-once), refresh/approval | `save_sysinfo`, `device_known`, `missing_fields`, `parse_cpu`, `parse_memory`, `parse_os`, `request_refresh`, `take_refresh`, `take_approval`, `info_out` |
+| `discovery.py` | drain очереди → БД | `reset_online`, `drain_once` (upsert, merge source, stale sweep, лог переполнения очереди) |
+| `discovery_events.py` | потокобезопасная очередь | `publish`, `drain`, `dropped_count`; `MAX_EVENTS=20000` |
+| `audit.py` | append-only журнал, редактирование, retention | `record`, `write_event`, `write_access`, `cleanup_once`, `retention_days`, `serialize`, `diff_fields`, `note_rate_limited` |
 | `connections.py` | события «пользователь → устройство» из запросов шима | `token_index`, `token_digest`, `build_event`, `device_label`, `resolve_by_token`, `resolve_user` |
 
 ### `app/core/`
@@ -78,10 +73,11 @@
 | Файл | Ответственность |
 |---|---|
 | `config.py` | все env-настройки, `resolved_database_url`, fail-fast секретов, `docs_enabled` |
-| `security.py` | bcrypt, `new_token` |
+| `security.py` | bcrypt, `password_error`, `new_token` |
 | `crypto.py` | Fernet для паролей устройств; ephemeral key при пустом `DEVICE_SECRET` (dev) |
+| `timeutil.py` | `utcnow`, `utc_from_timestamp`, `to_naive_utc`, `iso` — naive UTC (DEC-005) без устаревших `datetime.utcnow()` |
 | `validators.py` | `validate_rustdesk_id`: запрет `@ / \ ? & =`, пробелов; regex `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` |
-| `middleware.py` | `client_ip`, `BodyCapMiddleware`, `RateLimitMiddleware`, `AuditMiddleware`, `heartbeat_allow`, `reset_rate_limits` |
+| `middleware.py` | чистые ASGI: `AuditMiddleware`, `PanelSessionMiddleware`, `RateLimitMiddleware`, `BodyCapMiddleware`; `scope_client_ip`/`client_ip`, `heartbeat_allow`, `reset_rate_limits` |
 | `logging.py` | `basicConfig`; файлового handler нет |
 
 ### `app/models/`, `app/schemas/`, `app/db/`
@@ -89,17 +85,17 @@
 | Путь | Содержимое |
 |---|---|
 | `app/models/models.py` | `User`, `Session`, `AddressBook`, `AddressBookEntry`, `Tag`, `EntryTag`, `AddressBookPermission`, `DiscoveredDevice`, `DeviceInfo`, `AuditEvent` |
-| `app/schemas/rustdesk.py` | `LoginIn`, `UserOut`, `LoginOut`, `PeerOut`, `PeersPage`, `TagOut`, `SharedProfileOut`, `SharedProfilesPage`, `ErrorOut` |
-| `app/schemas/panel.py` | `EntryIn`, `TagIn`, `UserIn`, `BulkIdsIn`, `BulkTagsIn`, `DiscoveredAddIn`, `AddressBookOut`, `EntryOut`, `TagOut`, `UserOut` |
+| `app/schemas/rustdesk.py` | `LoginIn` (остальные тела клиента — свободный JSON, проверяется в роуте) |
+| `app/schemas/panel.py` | `EntryIn`, `TagIn` (цвет 0…0xFFFFFFFF), `UserIn`, `MeIn`, `BulkIdsIn`, `BulkTagsIn`, `DiscoveredAddIn` |
 | `app/db/base.py` | `Base` |
-| `app/db/session.py` | engine, SQLite `PRAGMA foreign_keys=ON` + `busy_timeout=5000`, `SessionLocal`, `get_db`, `check_ready` |
+| `app/db/session.py` | engine, SQLite `PRAGMA foreign_keys=ON` + `busy_timeout=5000` + `journal_mode=WAL`, `SessionLocal`, `get_db`, `check_ready` |
 | `app/web/templates/` | Jinja-шаблоны legacy-панели (`base`, `login`, `devices`, `tags`, `users`) |
 
 ### `app/shim/`
 
 | Файл | Содержимое |
 |---|---|
-| `shim.py` | `SessionCrypt` (secretbox v0), `load_sign_sk`, `Gate`, `_DiscoveryGuard`, `_ConnTracker`, `handle/_handle`, `UdpRelay`, `amain`, CLI |
+| `shim.py` | `SessionCrypt` (secretbox v0), `load_sign_sk`, `Gate`, `_DiscoveryGuard`, `_ConnTracker`, `handle/_handle`, `UdpRelay`, `serve()` (общий для супервизора и CLI), `amain`, CLI |
 | `rendezvous_pb2.py` | сгенерированный protobuf; менять только вместе с `.proto` и `grpcio-tools` |
 
 Ключевые константы: `FIRST_TIMEOUT=40`, `READ_TIMEOUT=60`, `MAX_FRAME=2 MiB`,
@@ -111,24 +107,24 @@
 
 | Файл | Назначение |
 |---|---|
-| `frontend/src/api.ts` | `req()`, `ApiError`, хранение токена в `localStorage`, все вызовы `/api/v1` и `/api/login` |
+| `frontend/src/api.ts` | `req()`, `qs()`, `ApiError`, типы тел запросов (`EntryInput`, `TagInput`, `UserCreate`, `UserPatch`, …), хранение токена в `localStorage`, все вызовы `/api/v1` и `/api/login` |
 | `frontend/src/types.ts` | контрактные типы, `parseUtc`, `relTime(iso, lang)`, `colorCss`, `textOnColor` |
 | `frontend/src/App.tsx` | провайдеры i18n и уведомлений, HashRouter, Guard по наличию токена, маршруты |
 | `frontend/src/i18n.tsx` | словари RU/EN, `I18nProvider`, `useI18n()`, `translate()`; выбор языка в `localStorage` |
 | `frontend/src/notifications.tsx` | `NotificationProvider`, `useNotify()`, глобальный хост тостов сверху |
 | `frontend/src/components.tsx` | Layout, навигация, Brand, LangSwitch, ProfileDialog (свой display name), Badge, TagBadge, Modal, Confirm, Pagination |
 | `frontend/src/hooks.ts` | `useDebounce`, `useTheme` (светлая тема по умолчанию) |
-| `frontend/src/pages/Devices.tsx` | основной экран: книги, поиск/фильтры, presence, discovered, bulk, карточка устройства, sysinfo |
+| `frontend/src/pages/Devices.tsx` | основной экран: книги, поиск/фильтры, presence, discovered, bulk (состояние и загрузка данных) |
+| `frontend/src/pages/devices/` | части экрана устройств: `DetailDrawer.tsx` (карточка), `dialogs.tsx` (добавление из discovered, bulk-теги, форма устройства), `rows.tsx` (строки, вкладки), `format.ts` (форматирование времени/источника/свежести) |
 | `frontend/src/pages/Books.tsx` | список/создание/переименование/удаление книг |
 | `frontend/src/pages/Tags.tsx` | теги, цвета, переименование, удаление |
 | `frontend/src/pages/Users.tsx` | администрирование пользователей, display name |
-| `frontend/src/pages/Audit.tsx` | admin-only журнал событий: фильтры, пагинация, детали, переход в карточку устройства |
 | `frontend/src/pages/Audit.tsx` | admin-only журнал событий: фильтры, пагинация, детали, переход в карточку устройства |
 | `frontend/src/pages/Login.tsx` | вход, сохранение сессии, брендинг |
 | `frontend/vite.config.ts` | `base: '/app/'`, dev-proxy `/api` → `127.0.0.1:8000` |
 
 Если меняешь контракт API, синхронно проверяй `api.ts`, `types.ts`,
-`Devices.tsx` и соответствующий backend-роут.
+`Devices.tsx`/`pages/devices/*` и соответствующий backend-роут.
 
 ## 5. Миграции и БД
 
@@ -172,12 +168,12 @@
 | Задача | Начать с | Проверить вместе |
 |---|---|---|
 | Новый RustDesk-совместимый эндпоинт | `app/api/rustdesk.py` | `app/schemas/rustdesk.py`, `docs/project/API_REFERENCE.md`, живой клиент |
-| Новый внутренний эндпоинт панели | `app/api/webapi.py` | `frontend/src/api.ts`, `types.ts`, `webapi` тесты/ручной smoke |
-| Изменить права книги | `app/services/ab.py` | все вызовы `get_book_for_user`/`rule_for`, `rustdesk.py`, `webapi.py`, `panel.py` |
+| Новый внутренний эндпоинт панели | `app/api/v1/<область>.py` | `v1/common.py`, `frontend/src/api.ts`, `types.ts`, `tests/test_api_contracts.py` |
+| Изменить права книги | `app/services/ab.py` (`book_access`, `visible_books`) | `tests/test_api_contracts.py`, `tests/test_refactor_regressions.py`; роуты менять не нужно |
 | Изменить модель/схему | `app/models/models.py` | новая миграция, `docs/project/DATA_MODEL.md`, существующая БД |
-| Presence/heartbeat | `app/services/presence.py`, `app/api/rustdesk.py` | `webapi.entry_out`, `Devices.tsx`, `docs/SECURITY.md` (SEC-005) |
-| Sysinfo | `app/services/device_info.py`, `app/api/rustdesk.py` | `webapi` device-info, `Devices.tsx`, миграция 0004 |
-| Discovery | `app/shim/shim.py`, `app/services/discovery*.py` | `app/main.py` lifespan, `webapi`, `Devices.tsx`, `docs/knowledge/ERRORS.md` |
+| Presence/heartbeat | `app/services/presence.py`, `app/api/rustdesk.py` | `ab.book_counts`, `v1/common.entry_out`, `Devices.tsx`, `docs/SECURITY.md` (SEC-005) |
+| Sysinfo | `app/services/device_info.py`, `app/api/rustdesk.py` | `v1/devices.py`, `pages/devices/DetailDrawer.tsx`, миграция 0004 |
+| Discovery | `app/shim/shim.py`, `app/services/discovery*.py` | `app/main.py` lifespan, `v1/devices.py`, `Devices.tsx`, `docs/knowledge/ERRORS.md` |
 | KX/протокол | `app/shim/shim.py` | `scripts/repro_handshake.py`, `check_keys.py`, `docs/en.md §6,10`, живой клиент |
 | UI-контракт | `frontend/src/api.ts` | `types.ts`, страница, backend |
 | Запуск/деплой | `app/__main__.py`, `Dockerfile`, `docker-compose.yml` | `scripts/*`, `docs/development/WORKFLOW.md` |
@@ -187,7 +183,7 @@
 ## 9. Файлы, которые часто меняются вместе
 
 - `app/models/models.py` + `alembic/versions/*` + `docs/project/DATA_MODEL.md`.
-- `app/api/webapi.py` + `frontend/src/api.ts` + `frontend/src/types.ts` +
+- `app/api/v1/*.py` + `frontend/src/api.ts` + `frontend/src/types.ts` +
   соответствующая страница.
 - `app/shim/shim.py` + `app/shim_supervisor.py` + `app/main.py` lifespan +
   `app/services/discovery*.py`.
@@ -196,7 +192,9 @@
 - `app/core/middleware.py` + `app/core/config.py` + `docs/project/ARCHITECTURE.md`
   + `docs/SECURITY.md` при изменении rate limiting.
 - `tests/test_heartbeat_rate_limit.py` + `app/core/middleware.py` +
-  `app/api/rustdesk.py` при изменении heartbeat.
+  `app/services/presence.py` + `app/api/rustdesk.py` при изменении heartbeat.
+- `tests/test_api_contracts.py` при любом изменении формы ответа `/api/*`
+  или `/api/v1/*`.
 - `tests/test_sysinfo_upload.py` + `app/services/device_info.py` +
   `app/api/rustdesk.py` при изменении sysinfo/refresh.
 - `README.md` + `docs/ru.md` + `docs/en.md` при изменении публичного

@@ -31,9 +31,11 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.timeutil import utcnow
 from app.models.models import AddressBook, AddressBookEntry, DeviceInfo
 from app.models.models import Session as SessionModel
 from app.models.models import User
+from app.services.auth import session_expired
 
 CONNECTION_VIA = ("direct", "relay")
 EVENT_TYPE = "connection.request"
@@ -107,8 +109,7 @@ def resolve_by_token(
     user = _active(db.get(User, s.user_id))
     if user is None:
         return None, "", ""
-    expired = s.expires_at is not None and s.expires_at < datetime.utcnow()
-    return user, "token_expired" if expired else "token", s.device_id or ""
+    return user, "token_expired" if session_expired(s) else "token", s.device_id or ""
 
 
 def resolve_user(db: Session, rid: str) -> tuple[User | None, str]:
@@ -123,9 +124,7 @@ def resolve_user(db: Session, rid: str) -> tuple[User | None, str]:
         .order_by(SessionModel.created_at.desc())
         .limit(1)
     )
-    if session is not None and (
-        session.expires_at is None or session.expires_at >= datetime.utcnow()
-    ):
+    if session is not None and not session_expired(session):
         user = _active(db.get(User, session.user_id))
         if user is not None:
             return user, "session"
@@ -199,7 +198,7 @@ def build_event(
         "request_id": "",
         "target_type": "device",
         "target_id": to_id,
-        "timestamp": when or datetime.utcnow(),
+        "timestamp": when or utcnow(),
         "details": details,
         "flush": False,
     }

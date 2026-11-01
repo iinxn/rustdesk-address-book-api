@@ -55,9 +55,5 @@ def drain(max_items: int = 5_000) -> list[tuple]:
     return out
 
 
-def qsize() -> int:
-    return _q.qsize()
-
-
 def dropped_count() -> int:
     return _dropped

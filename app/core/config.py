@@ -148,10 +148,9 @@ def load_settings() -> Settings:
                      "Generate one with: python -m app.cli gen-key")
     s.require_secret("WEB_SECRET", s.web_secret,
                      "Set any random 32+ char string")
-    if s.shim_enabled == "1":
-        if not s.shim_id_key or not os.path.isfile(s.shim_id_key):
-            raise SystemExit("FATAL: SHIM_ID_KEY must point at hbbs id_ed25519 "
-                             "when SHIM_ENABLED=1")
+    if s.shim_enabled == "1" and not (s.shim_id_key and os.path.isfile(s.shim_id_key)):
+        raise SystemExit("FATAL: SHIM_ID_KEY must point at hbbs id_ed25519 "
+                         "when SHIM_ENABLED=1")
     return s
 
 

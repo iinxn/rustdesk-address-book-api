@@ -21,16 +21,20 @@ def ensure_dirs() -> None:
     os.chmod(DATA_DIR, 0o700)
     # Tighten whichever SQLite database the configured URL actually uses
     # (installations may keep data in data/pc-service.db, not only base.db).
+    # The WAL/shared-memory side files are part of the database (WAL mode,
+    # see app/db/session.py) and get the same permissions.
     url = settings.resolved_database_url
     if url.startswith("sqlite:///"):
         db = Path(url[len("sqlite:///"):])
-        if db.exists() and db.is_file():
-            os.chmod(db, 0o600)
+        for path in (db, db.with_name(db.name + "-wal"), db.with_name(db.name + "-shm")):
+            if path.is_file():
+                os.chmod(path, 0o600)
 
 
 def run_migrations() -> None:
+    from alembic import command  # type: ignore[attr-defined]  # lazy submodule
     from alembic.config import Config
-    from alembic import command
+
     from app.core.config import BASE_DIR
     cfg = Config()
     cfg.set_main_option("script_location", str(BASE_DIR / "alembic"))

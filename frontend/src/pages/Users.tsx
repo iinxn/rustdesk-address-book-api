@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, sessionUser, setDisplayName } from '../api';
+import type { UserPatch } from '../api';
 import { Confirm, Layout, LoadError, Loading, btn, btnGhost, input } from '../components';
 import { useTheme } from '../hooks';
 import { useI18n } from '../i18n';
@@ -67,7 +68,7 @@ export default function Users() {
       setEditing(null); notify(true, t('users.updated')); load();
     } catch (e) { notify(false, String((e as Error).message)); }
   };
-  const flip = async (u: PanelUser, patch: object, msg: string) => {
+  const flip = async (u: PanelUser, patch: UserPatch, msg: string) => {
     try {
       await api.updateUser(u.id, patch);
       notify(true, msg); load();

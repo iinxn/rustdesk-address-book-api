@@ -1,19 +1,32 @@
-"""Small hardening middlewares. No new dependencies.
+"""HTTP middleware: audit context, panel cookie, rate limits, body cap.
 
-- BodyCap: reject requests with Content-Length above limit (413).
+All of them are plain ASGI callables. `BaseHTTPMiddleware` ran every request
+through an extra task and memory stream per layer, and the access log write
+delayed the response; here the access row is written after the response has
+been sent. Order (outermost first, see `app/main.py`):
+
+    AuditMiddleware -> PanelSessionMiddleware -> RateLimitMiddleware -> BodyCapMiddleware
+
+- BodyCap: `Content-Length` above `MAX_BODY_BYTES` -> 413; a chunked body is
+  buffered up to the same limit before the app sees it (SEC-013).
 - RateLimit: login/sysinfo use per-IP buckets; heartbeat uses an independent
   per-device bucket plus an aggregate per-IP cap (429 + `Retry-After`).
+- Audit: request id, source IP context and a bounded access/security history.
 """
+from __future__ import annotations
+
 import json
 import logging
 import math
 import threading
 import time
 from collections import deque
+from collections.abc import Awaitable, Callable, MutableMapping
+from typing import Any
+from urllib.parse import parse_qs
 
-from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.datastructures import Headers, MutableHeaders
 
 from app.core.config import settings
 from app.core.validators import validate_rustdesk_id
@@ -21,10 +34,16 @@ from app.services import audit as audit_svc
 
 log = logging.getLogger("app.access")
 
+Scope = MutableMapping[str, Any]
+Message = MutableMapping[str, Any]
+Receive = Callable[[], Awaitable[Message]]
+Send = Callable[[Message], Awaitable[None]]
+ASGIApp = Callable[[Scope, Receive, Send], Awaitable[None]]
+
 WINDOW_SEC = 60.0
-# Heartbeat payloads are tiny (id/uuid/ver). Parse the body in middleware only
+# Heartbeat payloads are tiny (id/uuid/ver). The limiter reads the body only
 # when Content-Length is present and small, so a chunked/oversized request can
-# never make the limiter buffer it; such requests are keyed by IP only.
+# never make it buffer much; such requests are keyed by IP only.
 HEARTBEAT_BODY_LIMIT = 8 * 1024
 _SWEEP_INTERVAL = 60.0
 
@@ -32,6 +51,95 @@ _SWEEP_INTERVAL = 60.0
 HITS: dict[tuple, deque] = {}
 _last_sweep = 0.0
 
+
+# --- small ASGI helpers --------------------------------------------------------
+
+async def _send_json(send: Send, status: int, content: dict, headers: dict | None = None) -> None:
+    body = json.dumps(content).encode()
+    raw = [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())]
+    raw += [(k.lower().encode(), str(v).encode()) for k, v in (headers or {}).items()]
+    await send({"type": "http.response.start", "status": status, "headers": raw})
+    await send({"type": "http.response.body", "body": body})
+
+
+async def _read_body(receive: Receive, limit: int) -> bytes | None:
+    """Whole request body, or None as soon as it exceeds `limit` bytes."""
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        message = await receive()
+        if message["type"] != "http.request":  # client went away
+            break
+        chunk = message.get("body", b"")
+        size += len(chunk)
+        if size > limit:
+            return None
+        chunks.append(chunk)
+        if not message.get("more_body", False):
+            break
+    return b"".join(chunks)
+
+
+def _replay(body: bytes, receive: Receive) -> Receive:
+    """A `receive` that yields an already-read body once, then delegates."""
+    sent = False
+
+    async def replay() -> Message:
+        nonlocal sent
+        if not sent:
+            sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return await receive()
+
+    return replay
+
+
+def _content_length(headers: Headers) -> int | None:
+    raw = headers.get("content-length")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return 0
+
+
+def scope_client_ip(scope: Scope) -> str:
+    """Real client IP for rate-limit keying and audit rows.
+
+    The direct peer address is used by default. `X-Forwarded-For` is honored
+    ONLY when the immediate peer is a configured trusted proxy
+    (`TRUSTED_PROXIES`, e.g. Caddy on 127.0.0.1): we then walk the chain from
+    right to left and take the first hop that is not itself a trusted proxy.
+    Without a trusted proxy the header is ignored entirely, so a spoofed XFF
+    can neither dodge the limiter nor pin a victim into a shared bucket.
+    """
+    client = scope.get("client")
+    direct = (client[0] if client else "?").split("%")[0]
+    trusted = settings.trusted_proxies_set
+    if not trusted or direct not in trusted:
+        return direct
+    xff = Headers(scope=scope).get("x-forwarded-for", "")
+    for hop in reversed([h.strip() for h in xff.split(",") if h.strip()]):
+        ip = hop.split("%")[0]
+        if ip not in trusted:
+            return ip
+    return direct
+
+
+def client_ip(request) -> str:
+    """`scope_client_ip` for a Starlette `Request`."""
+    return scope_client_ip(request.scope)
+
+
+def bearer_from_headers(headers: Headers) -> str:
+    value = headers.get("authorization", "")
+    if value.lower().startswith("bearer "):
+        return value[7:].strip()
+    return ""
+
+
+# --- rate limiting -------------------------------------------------------------
 
 def reset_rate_limits() -> None:
     """Forget all buckets. Used by tests and after deliberate reconfiguration."""
@@ -65,26 +173,11 @@ def _maybe_sweep(now: float) -> None:
             HITS.pop(key, None)
 
 
-def _rate_limited(q: deque, now: float) -> JSONResponse:
-    return JSONResponse(
-        status_code=429,
-        content={"error": "rate limited"},
-        headers={"Retry-After": str(_retry_after(q, now))},
-    )
-
-
-async def _heartbeat_id(request) -> str | None:
+def _heartbeat_rid(body: bytes) -> str | None:
     """Validated device id from a small JSON heartbeat body, else None."""
-    raw_len = request.headers.get("content-length")
     try:
-        length = int(raw_len) if raw_len else 0
-    except ValueError:
-        return None
-    if length <= 0 or length > HEARTBEAT_BODY_LIMIT:
-        return None
-    try:
-        data = json.loads((await request.body()).decode("utf-8"))
-    except Exception:
+        data = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
         return None
     if not isinstance(data, dict):
         return None
@@ -130,26 +223,95 @@ def heartbeat_allow(rid: str | None, ip: str, now: float | None = None) -> tuple
     return True, 0
 
 
-def client_ip(request) -> str:
-    """Real client IP for rate-limit keying.
+def rate_limit_rules() -> list[tuple[str, tuple[str, ...], str]]:
+    # Heartbeat has its own per-device + aggregate-IP logic.
+    # `/panel/login` is a second password entry point (legacy panel): it gets
+    # the same per-IP budget as `/api/login`, in its own bucket.
+    return [
+        ("/api/login", ("POST",), "login_per_minute_per_ip"),
+        ("/panel/login", ("POST",), "login_per_minute_per_ip"),
+        ("/api/sysinfo", ("POST",), "sysinfo_per_minute_per_ip"),
+    ]
 
-    The direct peer address is used by default. `X-Forwarded-For` is honored
-    ONLY when the immediate peer is a configured trusted proxy
-    (`TRUSTED_PROXIES`, e.g. Caddy on 127.0.0.1): we then walk the chain from
-    right to left and take the first hop that is not itself a trusted proxy.
-    Without a trusted proxy the header is ignored entirely, so a spoofed XFF
-    can neither dodge the limiter nor pin a victim into a shared bucket.
+
+async def _too_many(send: Send, retry: int) -> None:
+    await _send_json(send, 429, {"error": "rate limited"}, {"Retry-After": retry})
+
+
+class RateLimitMiddleware:
+    """Per-IP buckets for login/sysinfo, per-device + per-IP for heartbeat.
+
+    Limits resolve from settings per request (test- and env-tunable).
     """
-    direct = (request.client.host if request.client else "?").split("%")[0]
-    trusted = settings.trusted_proxies_set
-    if not trusted or direct not in trusted:
-        return direct
-    xff = request.headers.get("x-forwarded-for", "")
-    for hop in reversed([h.strip() for h in xff.split(",") if h.strip()]):
-        ip = hop.split("%")[0]
-        if ip not in trusted:
-            return ip
-    return direct
+
+    def __init__(self, app: ASGIApp, rules):
+        self.app = app
+        self.rules = rules
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        method, path = scope["method"], scope["path"]
+        ip = scope_client_ip(scope)
+
+        if method == "POST" and path.startswith("/api/heartbeat"):
+            rid = None
+            length = _content_length(Headers(scope=scope))
+            if length is not None and 0 < length <= HEARTBEAT_BODY_LIMIT:
+                body = await _read_body(receive, HEARTBEAT_BODY_LIMIT)
+                if body is not None:
+                    receive = _replay(body, receive)
+                    rid = _heartbeat_rid(body)
+            allowed, retry = heartbeat_allow(rid, ip)
+            if not allowed:
+                # Log-only (no DB write): cheap enough for the event loop.
+                audit_svc.note_rate_limited("/api/heartbeat", ip, retry, audit_it=False)
+                await _too_many(send, retry)
+                return
+            await self.app(scope, receive, send)
+            return
+
+        for prefix, methods, attr in self.rules:
+            if method in methods and path.startswith(prefix):
+                now = time.monotonic()
+                _maybe_sweep(now)
+                q = HITS.setdefault((prefix, ip), deque())
+                _prune(q, now)
+                if len(q) >= getattr(settings, attr):
+                    retry = _retry_after(q, now)
+                    # May write one throttled audit row: keep SQLite off the loop.
+                    await run_in_threadpool(audit_svc.note_rate_limited, prefix, ip, retry, True)
+                    await _too_many(send, retry)
+                    return
+                q.append(now)
+                break
+        await self.app(scope, receive, send)
+
+
+class BodyCapMiddleware:
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        limit = settings.max_body_bytes
+        headers = Headers(scope=scope)
+        length = _content_length(headers)
+        if length is not None:
+            if length > limit:
+                await _send_json(send, 413, {"detail": "body too large"})
+                return
+        elif "chunked" in headers.get("transfer-encoding", "").lower():
+            # SEC-013: no declared length — buffer at most `limit` bytes first.
+            body = await _read_body(receive, limit)
+            if body is None:
+                await _send_json(send, 413, {"detail": "body too large"})
+                return
+            receive = _replay(body, receive)
+        await self.app(scope, receive, send)
 
 
 class PanelSessionMiddleware:
@@ -162,92 +324,23 @@ class PanelSessionMiddleware:
     mutable flag, so concurrent requests cannot see each other's setting.
     """
 
-    def __init__(self, app, secret_key: str, mode: str = "auto", **kwargs):
+    def __init__(self, app: ASGIApp, secret_key: str, mode: str = "auto", **kwargs):
         from starlette.middleware.sessions import SessionMiddleware
 
         self.mode = mode if mode in ("auto", "1", "0") else "auto"
         self.plain = SessionMiddleware(app, secret_key=secret_key, https_only=False, **kwargs)
         self.secure = SessionMiddleware(app, secret_key=secret_key, https_only=True, **kwargs)
 
-    def _is_secure(self, scope) -> bool:
+    def _is_secure(self, scope: Scope) -> bool:
         if self.mode == "1":
             return True
         if self.mode == "0":
             return False
         return scope.get("scheme") in ("https", "wss")
 
-    async def __call__(self, scope, receive, send):
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         inner = self.secure if self._is_secure(scope) else self.plain
         await inner(scope, receive, send)
-
-
-class BodyCapMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        try:
-            length = int(request.headers.get("content-length", "0") or 0)
-        except ValueError:
-            length = 0
-        if length > settings.max_body_bytes:
-            return JSONResponse(status_code=413, content={"detail": "body too large"})
-        return await call_next(request)
-
-
-class RateLimitMiddleware(BaseHTTPMiddleware):
-    """Per-IP buckets for login/sysinfo, per-device + per-IP for heartbeat.
-
-    Limits resolve from settings per request (test- and env-tunable).
-    """
-
-    def __init__(self, app, rules):
-        super().__init__(app)
-        self.rules = rules
-        self.hits = HITS
-
-    def _key(self, request, prefix: str) -> tuple:
-        return (prefix, client_ip(request))
-
-    async def dispatch(self, request, call_next):
-        if request.method == "POST" and request.url.path.startswith("/api/heartbeat"):
-            rid = await _heartbeat_id(request)
-            allowed, retry = heartbeat_allow(rid, client_ip(request))
-            if not allowed:
-                audit_svc.note_rate_limited(
-                    "/api/heartbeat", client_ip(request), retry, audit_it=False
-                )
-                return JSONResponse(
-                    status_code=429,
-                    content={"error": "rate limited"},
-                    headers={"Retry-After": str(retry)},
-                )
-            return await call_next(request)
-
-        for prefix, methods, attr in self.rules:
-            if request.method in methods and request.url.path.startswith(prefix):
-                per_min = getattr(settings, attr)
-                now = time.monotonic()
-                _maybe_sweep(now)
-                k = self._key(request, prefix)
-                q = self.hits.setdefault(k, deque())
-                _prune(q, now)
-                if len(q) >= per_min:
-                    audit_svc.note_rate_limited(
-                        prefix, client_ip(request), _retry_after(q, now), audit_it=True
-                    )
-                    return _rate_limited(q, now)
-                q.append(now)
-                break
-        return await call_next(request)
-
-
-def rate_limit_rules():
-    # Heartbeat has its own per-device + aggregate-IP logic in dispatch().
-    # `/panel/login` is a second password entry point (legacy panel): it gets
-    # the same per-IP budget as `/api/login`, in its own bucket.
-    return [
-        ("/api/login", ("POST",), "login_per_minute_per_ip"),
-        ("/panel/login", ("POST",), "login_per_minute_per_ip"),
-        ("/api/sysinfo", ("POST",), "sysinfo_per_minute_per_ip"),
-    ]
 
 
 # --- audit/access middleware -------------------------------------------------
@@ -278,13 +371,6 @@ _READ_DEDUPE_LOCK = threading.Lock()
 _READ_DEDUPE_MAX = 5000
 
 
-def _bearer(request) -> str:
-    value = request.headers.get("authorization", "")
-    if value.lower().startswith("bearer "):
-        return value[7:].strip()
-    return ""
-
-
 def _read_allowed(key: tuple, window: int) -> bool:
     """Collapse repeated reads of the same resource (panel polling)."""
     if window <= 0:
@@ -300,6 +386,10 @@ def _read_allowed(key: tuple, window: int) -> bool:
                 if now - ts >= window:
                     _READ_DEDUPE.pop(k, None)
     return True
+
+
+def _is_mutation(method: str, route: str) -> bool:
+    return method in _MUTATION_METHODS and route not in _READ_ONLY_ROUTES
 
 
 def _audit_significant(method: str, route: str, path: str, status: int, params: dict) -> bool:
@@ -318,29 +408,28 @@ def _audit_significant(method: str, route: str, path: str, status: int, params: 
         return False
     if status in (401, 403, 413) or status >= 500:
         return True
-    if method in _MUTATION_METHODS and route not in _READ_ONLY_ROUTES:
+    if _is_mutation(method, route):
         return True
-    if method in ("GET", "POST") and params:
-        return True
-    return False
+    return method in ("GET", "POST") and bool(params)
 
 
-def _audit_params(request) -> dict:
+def _audit_params(scope: Scope) -> dict:
     """Path params plus only the query keys that identify a resource.
 
     Query strings may contain arbitrary user data; the audit log must not
     become a copy of them. `ab`/`book` are the RustDesk address-book selectors
     and `rid` is a device id, so those are safe to use as targets.
     """
-    params = dict(request.scope.get("path_params") or {})
+    params = dict(scope.get("path_params") or {})
+    query = parse_qs(scope.get("query_string", b"").decode("latin-1"))
     for key in ("ab", "book", "rid"):
-        value = request.query_params.get(key)
-        if value and key not in params:
-            params[key] = value
+        values = query.get(key)
+        if values and values[0] and key not in params:
+            params[key] = values[0]
     return params
 
 
-class AuditMiddleware(BaseHTTPMiddleware):
+class AuditMiddleware:
     """Request id + source IP context and a bounded access/security history.
 
     It does not log every request. Only mutations, failures/denials and reads
@@ -349,74 +438,74 @@ class AuditMiddleware(BaseHTTPMiddleware):
     stays on stdout/stderr and is not duplicated into SQLite.
     """
 
-    async def dispatch(self, request, call_next):
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
         started = time.perf_counter()
-        path = request.url.path
-        source_ip = client_ip(request)
-        token = _bearer(request)
+        path, method = scope["path"], scope["method"]
+        source_ip = scope_client_ip(scope)
+        token = bearer_from_headers(Headers(scope=scope))
         request_id = audit_svc.new_request_id()
-        destination = "panel" if path.startswith("/panel") else "api"
-        ctx_token = audit_svc.set_request_context(
-            audit_svc.RequestContext(
-                request_id=request_id,
-                source_ip=source_ip,
-                destination=destination,
-                http_method=request.method,
-                route=path,
-            )
-        )
+        ctx_token = audit_svc.set_request_context(audit_svc.RequestContext(
+            request_id=request_id,
+            source_ip=source_ip,
+            destination="panel" if path.startswith("/panel") else "api",
+            http_method=method,
+            route=path,
+        ))
         status = 500
-        response = None
+
+        async def send_with_id(message: Message) -> None:
+            nonlocal status
+            if message["type"] == "http.response.start":
+                status = message["status"]
+                MutableHeaders(scope=message).append("X-Request-ID", request_id)
+            await send(message)
+
         try:
+            await self.app(scope, receive, send_with_id)
+        except Exception:
+            log.exception("unhandled error request_id=%s method=%s path=%s",
+                          request_id, method, path)
+            raise
+        finally:
             try:
-                response = await call_next(request)
-                status = response.status_code
-            except Exception:
-                log.exception(
-                    "unhandled error request_id=%s method=%s path=%s",
-                    request_id, request.method, path,
-                )
-                raise
-            finally:
+                # The response is already on the wire: the access row and the
+                # slow-request warning no longer add latency for the client.
                 duration_ms = int((time.perf_counter() - started) * 1000)
-                route = getattr(request.scope.get("route"), "path", None) or path
-                params = _audit_params(request)
-                if response is not None:
-                    response.headers["X-Request-ID"] = request_id
-                if _audit_significant(request.method, route, path, status, params):
-                    is_mutation = (
-                        request.method in _MUTATION_METHODS
-                        and route not in _READ_ONLY_ROUTES
-                    )
-                    should_write = True
-                    if not is_mutation and status < 400:
-                        target_type, target_id = audit_svc.target_from_params(params)
-                        actor_key = token or f"ip:{source_ip}"
-                        should_write = _read_allowed(
-                            (actor_key, request.method, route, target_type, target_id),
-                            settings.audit_read_dedupe_sec,
-                        )
-                    if should_write:
-                        await run_in_threadpool(
-                            audit_svc.write_access,
-                            method=request.method,
-                            route=route,
-                            path=path,
-                            status_code=status,
-                            duration_ms=duration_ms,
-                            request_id=request_id,
-                            source_ip=source_ip,
-                            token=token,
-                            params=params,
-                        )
-                if (
-                    settings.audit_slow_request_ms > 0
-                    and duration_ms >= settings.audit_slow_request_ms
-                ):
+                route = getattr(scope.get("route"), "path", None) or path
+                await self._record(method, route, path, status, duration_ms,
+                                   request_id, source_ip, token, _audit_params(scope))
+                if 0 < settings.audit_slow_request_ms <= duration_ms:
                     log.warning(
                         "slow request request_id=%s method=%s route=%s status=%s duration_ms=%d",
-                        request_id, request.method, route, status, duration_ms,
+                        request_id, method, route, status, duration_ms,
                     )
-        finally:
-            audit_svc.reset_request_context(ctx_token)
-        return response
+            finally:
+                audit_svc.reset_request_context(ctx_token)
+
+    @staticmethod
+    async def _record(method: str, route: str, path: str, status: int, duration_ms: int,
+                      request_id: str, source_ip: str, token: str, params: dict) -> None:
+        if not _audit_significant(method, route, path, status, params):
+            return
+        if not _is_mutation(method, route) and status < 400:
+            target_type, target_id = audit_svc.target_from_params(params)
+            if not _read_allowed((token or f"ip:{source_ip}", method, route, target_type, target_id),
+                                 settings.audit_read_dedupe_sec):
+                return
+        await run_in_threadpool(
+            audit_svc.write_access,
+            method=method,
+            route=route,
+            status_code=status,
+            duration_ms=duration_ms,
+            request_id=request_id,
+            source_ip=source_ip,
+            token=token,
+            params=params,
+        )

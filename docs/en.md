@@ -140,17 +140,17 @@ One database. No microservices.
 ```mermaid
 flowchart LR
     C[RustDesk client<br/>unmodified]
-    C -->|HTTP/HTTPS :8000<br/>/api/* : Bearer token| API[FastAPI app<br/>rustdesk/webapi/panel routers]
+    C -->|HTTP/HTTPS :8000<br/>/api/* : Bearer token| API[FastAPI app<br/>rustdesk/api.v1/panel routers]
     C -->|TCP+UDP 21116<br/>KX/secure, plain, datagrams| SHIM[KX shim<br/>supervised thread]
     SHIM -->|decrypted protobuf<br/>SHIM_UPSTREAM| HBBS[real hbbs rendezvous]
     C -->|/app/ :8000| SPA[Web Panel dist/]
-    API -->|SQLAlchemy 2.x<br/>FK ON, busy_timeout 5000| DB[(SQLite data/base.db<br/>Alembic 0001-0006)]
+    API -->|SQLAlchemy 2.x<br/>FK ON, busy_timeout 5000, WAL| DB[(SQLite data/base.db<br/>Alembic 0001-0006)]
 ```
 
 Request flow: `POST /api/login` → opaque server-side token (`sessions`,
 expiry `SESSION_DAYS`; logout deletes it) → `POST /api/ab/*` with
 `Authorization: Bearer` (book access re-checked per request via
-`get_book_for_user` + `rule_for`) → devices `POST /api/heartbeat {id,…}`
+`ab.book_access`) → devices `POST /api/heartbeat {id,…}`
 stamp `last_seen` (derived: `online` ≤ 45 s, else `offline`, never-seen
 `unknown`) → panel SPA uses `/api/v1/*` with the same token stored in
 `localStorage` (`ab_token`).

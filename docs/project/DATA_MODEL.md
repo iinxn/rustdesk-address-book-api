@@ -13,12 +13,22 @@
 - Модели: `app/models/models.py`. Миграции: `alembic/versions/`.
 - Первичные ключи — строки UUID (`String(36)`, `str(uuid.uuid4())`),
   генерируются в Python. Это сделано для переносимости SQLite/PostgreSQL.
-- Все даты — **naive UTC** (`datetime.utcnow()`), без timezone. Так исторически
+- Все даты — **naive UTC** (`app.core.timeutil.utcnow()`; до 2026-10-31 —
+  устаревший `datetime.utcnow()`, значения те же), без timezone. Так исторически
   устроена схема; frontend компенсирует это `parseUtc` в `frontend/src/types.ts`.
   Не начинай исправлять это точечно — только полной миграцией всех слоёв.
-- SQLite: на каждом соединении включаются `PRAGMA foreign_keys=ON` и
-  `PRAGMA busy_timeout=5000` (`app/db/session.py`), `timeout=5` при connect.
-  Один writer; долгие bulk-операции блокируют остальные записи.
+- SQLite: на каждом соединении включаются `PRAGMA foreign_keys=ON`,
+  `PRAGMA busy_timeout=5000` и `PRAGMA journal_mode=WAL`
+  (`app/db/session.py`), `timeout=5` при connect. `synchronous` — по
+  умолчанию (FULL). Один writer, но читатели не блокируются записью.
+- **WAL (с 2026-10-31).** Режим хранится в самом файле БД: при первом старте
+  новой версии `journal_mode` переключается с `delete` на `wal`, рядом с БД
+  появляются `<db>-wal` и `<db>-shm` — это часть базы (копировать файл БД
+  отдельно от них, пока процесс работает, нельзя; используй
+  `python -m app.cli backup`). `__main__.ensure_dirs` ставит им `0600`.
+  Схема и данные не меняются; откат — `PRAGMA journal_mode=DELETE` на
+  остановленном приложении. Каталог БД должен быть на локальной ФС (не
+  NFS/SMB): WAL требует общей памяти.
 - PostgreSQL заявлен в `DATABASE_URL`/зависимостях, но миграции и поведение
   проверялись только на SQLite. Считать PostgreSQL **непроверенным**.
 
@@ -161,8 +171,9 @@ frontend конвертирует его в CSS через `colorCss`/`textOnCol
 
 M2M без собственного `id`. Удаление entry или tag каскадно удаляет связи;
 удаление тега **не** удаляет устройства, удаление устройства не удаляет теги.
-`sync_entry_tags` заменяет набор, `add_entry_tags`/`remove_entry_tags` меняют
-частично.
+`ab.set_entry_tags` заменяет набор, `ab.change_tags` (bulk) добавляет и
+снимает теги у многих записей за фиксированное число запросов на книгу.
+Heartbeat обновляет `address_book_entries.last_seen`, но **не** `updated_at`.
 
 ### 3.7. `address_book_permissions`
 

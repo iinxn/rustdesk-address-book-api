@@ -35,8 +35,8 @@ audit-журнала. Одна SQLite-БД (по умолчанию `data/base.d
 | Не повторить прошлую ошибку                              | `docs/knowledge/LESSONS_LEARNED.md`               |
 | Понять, почему так сделано                                 | `docs/knowledge/DECISIONS.md`                     |
 | Узнать, что делать дальше                                   | `docs/TODO.md`                                    |
-| Диагностировать сбой по слоям                          | skill `project-debugging` (`.opencode/skills/`) |
-| Менять схему SQLite безопасно                                | skill `sqlite-changes` (`.opencode/skills/`)    |
+| Диагностировать сбой по слоям                          | skill `project-debugging` (`.opencode/skills/`, локально, не в git) |
+| Менять схему SQLite безопасно                                | skill `sqlite-changes` (`.opencode/skills/`, локально, не в git) |
 | Публичное описание и быстрый старт                 | `README.md`, `docs/ru.md`, `docs/en.md`       |
 
 ## 1. Технические инварианты

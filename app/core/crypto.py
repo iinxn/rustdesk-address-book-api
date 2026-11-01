@@ -30,7 +30,3 @@ def decrypt_password(token: str) -> str:
     except InvalidToken:
         return ""
 
-
-def reset_for_tests() -> None:
-    global _fernet
-    _fernet = None

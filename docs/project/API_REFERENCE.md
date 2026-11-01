@@ -24,8 +24,9 @@
 | Источник | Тело | Код |
 |---|---|---|
 | `current_user` / middleware 401 | `{"error":"unauthorized"}` | 401 |
-| ручные ошибки `/api/*` | `{"error":"..."}` | 400/401/403/404/409/422 |
-| ручные ошибки `/api/v1/*` | `{"detail":"..."}` | 400/403/404/409/422/500 |
+| ручные ошибки `/api/*` (`ClientError`) | `{"error":"..."}` | 400/401/403/404/409/422 |
+| ручные ошибки `/api/v1/*` (`PanelError`) | `{"detail":"..."}` | 400/403/404/409/422 |
+| необработанная ошибка | `text/plain` `Internal Server Error`, traceback только в логе с `request_id` | 500 |
 | Pydantic-валидация | `{"detail":[{...}]}` | 422 |
 | rate limit | `{"error":"rate limited"}` + `Retry-After` | 429 |
 | body cap | `{"detail":"body too large"}` | 413 |
@@ -43,7 +44,7 @@
 
 | Что | Значение | Где |
 |---|---|---|
-| `MAX_BODY_BYTES` | 5 MiB (по `Content-Length`) | `BodyCapMiddleware` |
+| `MAX_BODY_BYTES` | 5 MiB: по `Content-Length`, а chunked-тело без длины буферизуется до этого лимита (иначе `413`) | `BodyCapMiddleware` |
 | `/api/sysinfo` | 32 KiB (фактическое чтение тела) | `rustdesk.sysinfo` |
 | `/api/login` | 20 запросов/мин на IP | `LOGIN_PER_MINUTE_PER_IP` |
 | `/panel/login` | 20 запросов/мин на IP (свой bucket) | `LOGIN_PER_MINUTE_PER_IP` |
@@ -144,7 +145,9 @@ Bearer. Возвращает `{"guid": "<book id>"}`. Если личной кн
 
 ### 2.7. `POST /api/ab/shared/profiles?current=1&pageSize=100`
 
-Bearer. Возвращает shared-книги, доступные пользователю (admin — все):
+Bearer. Возвращает shared-книги, доступные пользователю (admin — все shared;
+остальные — книги со строкой permission). Порядок — по имени книги (стабильная
+пагинация):
 
 ```json
 {
@@ -182,8 +185,8 @@ admin на shared). `404 {"error":"no such address book"}` иначе.
 
 Для `personal`-книги в объекте есть `hash`, для `shared` — `password`
 (расшифрованный). Поля `presence`, `tag_objs`, `info` сюда **не** попадают.
-`pageSize` не ограничен, сортировка — по `rustdesk_id`; N+1 по тегам
-(SEC-006).
+`pageSize` не ограничен (SEC-006, остаток), сортировка — по `rustdesk_id`.
+Теги страницы выбираются одним запросом (N+1 устранён 2026-10-31).
 
 ### 2.9. `POST /api/ab/peer/add/{guid}`
 
@@ -205,6 +208,7 @@ Bearer + `can_write` (`rule >= 2`). Тело — произвольный JSON:
 
 Правила:
 
+- тело не JSON или не объект → `400 {"error":"bad json"}` (раньше не-объект давал 500);
 - `id` валидируется; `missing id` → 400, прочие ошибки ID → 422;
 - дубликат в книге → `409 {"error":"<id> already exists"}`;
 - превышение `MAX_PEER_ONE_AB` → `403 {"error":"exceed_max_devices"}`;
@@ -242,9 +246,11 @@ Bearer + write. Тело — JSON-массив ID:
 | PUT | `/api/ab/tag/update/{guid}` | `{"name":"a","color":...}` | `200`; `404`, если нет |
 | DELETE | `/api/ab/tag/{guid}` | `["a","b"]` | `200`; связи `entry_tags` каскадны |
 
-Все требуют доступа к книге; изменяющие — `can_write`. `color` приводится
-через `int(...)` без валидации диапазона: нечисловое значение даёт 500
-(SEC-004, известное ограничение).
+Все требуют доступа к книге; изменяющие — `can_write`. `color` — ARGB как
+беззнаковое 32-битное целое (0…4294967295); число или строка (`"16"`,
+`"0xFF00FF00"`). Иное значение (текст, отрицательное, больше uint32, `true`) →
+`400 {"error":"invalid color"}` (SEC-004 закрыт 2026-10-31). Тело не-объект →
+`400 bad json`.
 
 ### 2.13. `POST /api/heartbeat`
 
@@ -266,8 +272,9 @@ ID возможна by design (SEC-005, accepted risk). Защита от флу
 20/мин на пару `(id, client IP)` и 6000/мин суммарно на IP; запрос без
 валидного `id` (в т.ч. chunked без `Content-Length`) ограничивается только
 агрегатным IP-потолком. При `429` — `{"error":"rate limited"}` и
-`Retry-After`. DB-работа выполняется в threadpool, чтобы всплеск heartbeat
-не блокировал event loop.
+`Retry-After`. DB-работа выполняется в threadpool групповым commit-ом
+(`presence.HeartbeatWriter`): ответ уходит после записи, но параллельные
+heartbeat-ы пишутся одной транзакцией. `updated_at` записи не меняется.
 
 ### 2.14. `POST /api/sysinfo_ver`
 
@@ -346,8 +353,8 @@ loop.
 ## 3. Внутренний API панели `/api/v1`
 
 Все маршруты требуют Bearer. Ошибки — `{"detail": ...}`, кроме 401
-(см. §1.2). Доступ к книгам проверяется через `get_book_for_user` /
-`rule_for` на каждом запросе.
+(см. §1.2). Доступ к книгам проверяется через `ab.book_access` на каждом
+запросе.
 
 ### 3.1. `GET /api/v1/stats`
 
@@ -362,8 +369,9 @@ loop.
 }
 ```
 
-`devices`/presence считаются по видимым книгам; `discovered` — по всей
-таблице `discovered_devices`, независимо от книг (server-wide evidence).
+`devices`/presence считаются по видимым книгам (одним агрегатным SQL-запросом);
+`discovered` — по всей таблице `discovered_devices`, независимо от книг
+(server-wide evidence).
 
 ### 3.2. Книги
 
@@ -392,6 +400,11 @@ loop.
 ```
 
 Личную книгу нельзя переименовать/удалить через эти маршруты (`400`).
+
+«Видимые» — ровно те книги, которые можно открыть (`ab.visible_books`):
+своя personal, книги с permission, а для admin — все shared. До 2026-10-31
+admin дополнительно получал чужие personal-книги с `rule: 0`, которые
+при открытии отвечали `404` (SEC-026); теперь их в списке нет.
 
 ### 3.3. `GET /api/v1/address-books/{bid}/entries`
 
@@ -460,8 +473,9 @@ Query:
 Требует `can_write`. `rustdesk_id` валидируется (422), дубликат — 409.
 `password` шифруется, если передан. `tags` заменяют набор. Ответ — один
 `entry_out` (без `DeviceInfo`, поэтому `has_info=false` до следующего чтения).
-Лимит `MAX_PEER_ONE_AB` здесь **не** проверяется (в отличие от
-`/api/ab/peer/add` и `/api/v1/discovered/{rid}/add`).
+Лимит `MAX_PEER_ONE_AB` проверяется так же, как в `/api/ab/peer/add` и
+`/api/v1/discovered/{rid}/add`: `403 {"detail":"exceed_max_devices"}`
+(с 2026-10-31; все пути создания идут через `ab.add_entry`).
 
 ### 3.5. `GET|PUT|DELETE /api/v1/entries/{eid}`
 
@@ -501,7 +515,10 @@ Query:
 Теги создаются автоматически; удаление тега с записи не удаляет сам тег.
 
 Оба маршрута возвращают `400`, если ID больше 500 или (для tags) нет валидных
-имён; `500` при ошибке commit (rollback выполняется).
+имён. Ошибка commit не маскируется: обычный `500`, запись в логе с
+`request_id`, транзакция откатывается (раньше — `{"detail":"bulk … failed"}`
+без записи в лог). Правило «add побеждает» до 2026-10-31 не работало: тег из
+обоих списков снимался (`autoflush=False`, см. ERRORS.md).
 
 ### 3.7. Теги
 
@@ -515,6 +532,7 @@ Query:
 | DELETE | `/api/v1/entries/{eid}/tags/{tid}` | — | `{"ok":true}` |
 
 Требуют доступ к книге; изменяющие — `can_write`. Дубликат имени — 409.
+`color` — 0…4294967295, иначе `422` (Pydantic).
 Attach требует, чтобы entry и tag были в одной книге. Detach идемпотентен.
 
 ### 3.8. `GET /api/v1/discovered`
@@ -733,7 +751,12 @@ Cookie-сессия `session` (`PanelSessionMiddleware`, подпись `WEB_SEC
 | POST | `/panel/users/{uid}/delete` | admin, нельзя удалить себя |
 
 Все POST возвращают 303 (PRG). Ошибки прав чаще всего выглядят как редирект
-без изменения данных, а не как JSON-ошибка. Панель не является основным UI;
+без изменения данных, а не как JSON-ошибка. `?book=` на `/panel/devices` и
+`/panel/tags` проверяется теми же правилами, что и API: недоступная книга не
+выбирается, список пуст (до 2026-10-31 любой вошедший пользователь мог
+прочитать любую книгу по её UUID — SEC-027). Создание записи в панели
+учитывает `MAX_PEER_ONE_AB`; недопустимый цвет тега при обновлении
+оставляет прежний. Панель не является основным UI;
 новые функции добавляй в SPA, а не сюда.
 
 ## 5. Служебные маршруты

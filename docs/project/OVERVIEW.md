@@ -47,7 +47,7 @@
 | Запуск приложения | `app/__main__.py` | проверка настроек, каталоги/права, `alembic upgrade head`, запуск Uvicorn |
 | FastAPI-приложение | `app/main.py` | lifespan, middleware, роутеры, health, монтирование SPA |
 | RustDesk API | `app/api/rustdesk.py` | контракт клиента `/api/*`, сессии, книги, peers, tags, heartbeat, sysinfo |
-| Внутренний API | `app/api/webapi.py` | `/api/v1/*`: расширенные модели для SPA, bulk-операции, discovery, users, audit |
+| Внутренний API | `app/api/v1/` (`books`, `devices`, `users`, `audit`) | `/api/v1/*`: расширенные модели для SPA, bulk-операции, discovery, users, audit |
 | Журнал событий | `app/services/audit.py`, `app/core/middleware.py` | append-only `audit_events`, access/auth/business-события, retention |
 | Legacy-панель | `app/api/panel.py` | HTML-страницы `/panel/*` на cookie-сессии |
 | Доменные сервисы | `app/services/` | права книг, auth-сессии, presence, sysinfo, discovery |

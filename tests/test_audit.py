@@ -16,7 +16,7 @@ import pytest
 from sqlalchemy import select
 
 from app.db.session import SessionLocal
-from app.models.models import AddressBook, AddressBookEntry, AuditEvent, User
+from app.models.models import AddressBook, AddressBookEntry, AuditEvent
 from app.services import audit as audit_svc
 
 

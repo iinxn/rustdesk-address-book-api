@@ -13,12 +13,12 @@ def cmd_create_admin(args):
     from sqlalchemy import select
     from app.db.session import SessionLocal
     from app.models.models import User
+    from app.core.security import password_error
     from app.services.auth import DISPLAY_NAME_MAX, clean_display_name, create_user
     username = args.username or input("username: ").strip()
     password = getpass.getpass("password: ")
     if not username:
         raise SystemExit("username required")
-    from app.core.security import password_error
     if (problem := password_error(password)) is not None:
         raise SystemExit(problem)
     if len(clean_display_name(args.display_name)) > DISPLAY_NAME_MAX:
@@ -46,9 +46,10 @@ def cmd_dump_book(book_id: str):
             raise SystemExit("no such book")
         entries = db.scalars(select(AddressBookEntry).where(
             AddressBookEntry.address_book_id == book.id).order_by(AddressBookEntry.rustdesk_id)).all()
+        tags = ab_svc.tags_by_entry(db, book_id=book.id)
         out = []
         for e in entries:
-            d = ab_svc.peer_out(db, e, book)
+            d = ab_svc.peer_out(e, book, [t.name for t in tags.get(e.id, [])])
             if "password" in d:
                 d["password"] = "<set>" if d["password"] else "<empty>"
             if "hash" in d:
@@ -64,13 +65,13 @@ def cmd_backup(dest: str = ""):
     from app.core.config import DATA_DIR
     from app.db.session import engine
     import sqlite3
-    from datetime import datetime, timezone
+    from datetime import UTC, datetime
     from pathlib import Path
     url = str(engine.url)
     if not url.startswith("sqlite"):
         raise SystemExit("backup command supports sqlite only")
     src = Path(url.split("sqlite:///", 1)[1])
-    out = Path(dest) if dest else DATA_DIR / f"backup-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}.db"
+    out = Path(dest) if dest else DATA_DIR / f"backup-{datetime.now(UTC):%Y%m%d-%H%M%S}.db"
     out.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(str(src), timeout=30) as s, sqlite3.connect(str(out)) as d:
         s.backup(d)

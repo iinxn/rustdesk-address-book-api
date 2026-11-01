@@ -1,41 +1,20 @@
+"""Request bodies of the internal panel API (`/api/v1`)."""
 from pydantic import BaseModel, Field
 
-
-class AddressBookOut(BaseModel):
-    id: str
-    name: str
-    type: str
-    model_config = {"from_attributes": True}
+TAG_COLOR_MAX = 0xFFFFFFFF  # ARGB, unsigned 32-bit (same bound as services.ab)
 
 
 class EntryIn(BaseModel):
     rustdesk_id: str
     alias: str = ""
     note: str = ""
-    tags: list[str] = []
+    tags: list[str] = Field(default_factory=list)
     password: str = ""
-
-
-class EntryOut(BaseModel):
-    id: str
-    rustdesk_id: str
-    alias: str = ""
-    note: str = ""
-    tags: list[str] = []
-    model_config = {"from_attributes": True}
 
 
 class TagIn(BaseModel):
     name: str
-    color: int = 0
-
-
-class TagOut(BaseModel):
-    id: str
-    name: str
-    color: int = 0
-    devices: int = 0
-    model_config = {"from_attributes": True}
+    color: int = Field(default=0, ge=0, le=TAG_COLOR_MAX)
 
 
 class UserIn(BaseModel):
@@ -47,15 +26,6 @@ class UserIn(BaseModel):
 
 class MeIn(BaseModel):
     display_name: str = ""
-
-
-class UserOut(BaseModel):
-    id: str
-    username: str
-    display_name: str = ""
-    is_admin: bool = False
-    is_disabled: bool = False
-    model_config = {"from_attributes": True}
 
 
 class BulkIdsIn(BaseModel):

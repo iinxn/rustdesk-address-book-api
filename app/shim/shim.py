@@ -13,10 +13,12 @@ NEVER logs key material (fingerprints only).
 import argparse
 import asyncio
 import base64
+import contextlib
 import hashlib
 import logging
 import os
 import struct
+import threading
 import time
 from collections import deque
 
@@ -24,7 +26,6 @@ from app.core.validators import validate_rustdesk_id
 from app.services.discovery_events import publish as _publish_discovery
 from app.shim import rendezvous_pb2 as rz
 from nacl.bindings import (
-    crypto_box,
     crypto_box_keypair,
     crypto_box_open,
     crypto_secretbox,
@@ -73,7 +74,7 @@ def frame_encode(payload: bytes) -> bytes:
 async def read_exactly(reader: asyncio.StreamReader, n: int) -> bytes | None:
     try:
         return await asyncio.wait_for(reader.readexactly(n), READ_TIMEOUT)
-    except (asyncio.IncompleteReadError, ConnectionError, asyncio.TimeoutError):
+    except (asyncio.IncompleteReadError, ConnectionError, TimeoutError):
         return None
 
 
@@ -82,12 +83,13 @@ async def frame_decode(reader: asyncio.StreamReader) -> bytes | None:
     if not first:
         return None
     hl = (first[0] & 0x3) + 1
-    rest = b""
+    header = first
     if hl > 1:
         rest = await read_exactly(reader, hl - 1)
         if rest is None:
             return None
-    n = int.from_bytes(first + rest, "little") >> 2
+        header += rest
+    n = int.from_bytes(header, "little") >> 2
     if n > MAX_FRAME:
         return None
     if n == 0:
@@ -117,7 +119,8 @@ class SessionCrypt:
 
 
 def load_sign_sk(path: str) -> bytes:
-    raw = base64.b64decode(open(path).read().strip())
+    with open(path) as f:
+        raw = base64.b64decode(f.read().strip())
     if len(raw) != 64:
         raise SystemExit(f"FATAL: bad id_ed25519 length: {len(raw)}")
     return raw
@@ -385,7 +388,7 @@ async def pipe_plain(src, dst, tag: str):
         while True:
             try:
                 data = await asyncio.wait_for(src.read(65536), READ_TIMEOUT)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 break
             if not data:
                 break
@@ -465,7 +468,7 @@ async def handle(conn_r, conn_w, upstream, sign_sk: bytes, gate: Gate, diag: boo
         return
     try:
         await asyncio.wait_for(gate.sem.acquire(), 10)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         log.warning("%s: overloaded, drop", ip)
         conn_w.close()
         return
@@ -490,7 +493,7 @@ async def _handle(conn_r, conn_w, upstream, sign_sk: bytes, peer, diag: bool = F
     log.info("%s: sent KX (box_pk=%s)", peer, fp(bytes(box_pk)))
     try:
         first = await asyncio.wait_for(frame_decode(conn_r), FIRST_TIMEOUT)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         first = None
     if first is None:
         log.info("%s: no first frame, close", peer)
@@ -499,7 +502,6 @@ async def _handle(conn_r, conn_w, upstream, sign_sk: bytes, peer, diag: bool = F
         return
     mode = "plain"
     crypt = None
-    rest = first
     try:
         m = rz.RendezvousMessage()
         m.ParseFromString(first)
@@ -516,7 +518,6 @@ async def _handle(conn_r, conn_w, upstream, sign_sk: bytes, peer, diag: bool = F
                 raise ValueError("bad K len")
             crypt = SessionCrypt(K)
             mode = "secure"
-            rest = None
             log.info("%s: secure established (cli_eph=%s)", peer, fp(cli_eph))
         except Exception as e:
             log.warning("%s: KX open failed: %r", peer, e)
@@ -529,10 +530,10 @@ async def _handle(conn_r, conn_w, upstream, sign_sk: bytes, peer, diag: bool = F
         if mode == "plain":
             log.info("%s: plain passthrough (%s)", peer, kind)
             try:
-                tracker.observe(rest)
+                tracker.observe(first)
             except Exception as e:
                 log.debug("discovery observe error: %r", e)
-            up_w.write(frame_encode(rest))
+            up_w.write(frame_encode(first))
             await up_w.drain()
             await asyncio.gather(
                 pipe_plain(conn_r, up_w, "c2s-plain"),
@@ -549,11 +550,14 @@ async def _handle(conn_r, conn_w, upstream, sign_sk: bytes, peer, diag: bool = F
     finally:
         tracker.close()
         for w in (conn_w, up_w):
-            try:
-                w.close()
-            except Exception:
-                pass
+            _close_quietly(w)
     log.info("%s: closed (%s)", peer, mode)
+
+
+def _close_quietly(closable) -> None:
+    """Close a transport/writer during teardown; the peer may already be gone."""
+    with contextlib.suppress(Exception):
+        closable.close()
 
 
 # UDP rendezvous relay (plaintext protobuf: the UDP path has no crypto,
@@ -580,19 +584,15 @@ class _UpstreamProto(asyncio.DatagramProtocol):
         self.queue = queue
 
     def datagram_received(self, data: bytes, addr):
-        try:
+        with contextlib.suppress(asyncio.QueueFull):
             self.queue.put_nowait((data, addr))
-        except asyncio.QueueFull:
-            pass
 
     def error_received(self, exc):
-        pass
+        pass  # ICMP errors for a UDP upstream are expected; idle timeout cleans up
 
     def connection_lost(self, exc):
-        try:
+        with contextlib.suppress(asyncio.QueueFull):
             self.queue.put_nowait(None)
-        except asyncio.QueueFull:
-            pass
 
 
 class UdpRelay:
@@ -705,7 +705,7 @@ class UdpRelay:
             while True:
                 try:
                     item = await asyncio.wait_for(sess["queue"].get(), UDP_IDLE_TIMEOUT)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     break
                 if item is None:
                     break
@@ -721,10 +721,7 @@ class UdpRelay:
             if self.sessions.get(addr) is sess:
                 self._drop(addr)
             elif sess.get("up") is not None:
-                try:
-                    sess["up"].close()
-                except Exception:
-                    pass
+                _close_quietly(sess["up"])
 
     def _drop(self, addr):
         self.unconfirmed.pop(addr, None)
@@ -733,14 +730,9 @@ class UdpRelay:
             return
         up = sess.get("up")
         if up is not None:
-            try:
-                up.close()
-            except Exception:
-                pass
-        try:
+            _close_quietly(up)
+        with contextlib.suppress(asyncio.QueueFull):
             sess["queue"].put_nowait(None)
-        except asyncio.QueueFull:
-            pass
         log.debug("udp session closed for %s", addr[0])
 
     async def _sweep(self):
@@ -767,10 +759,7 @@ class UdpRelay:
         for t in list(self._tasks):
             t.cancel()
         if self.transport is not None:
-            try:
-                self.transport.close()
-            except Exception:
-                pass
+            _close_quietly(self.transport)
             self.transport = None
 
 
@@ -809,31 +798,61 @@ def raise_fd_limit(udp_sessions: int, tcp_conns: int) -> None:
                     "raise LimitNOFILE / ulimit -n", soft, need)
 
 
-async def amain(args):
-    host, port = args.listen.rsplit(":", 1)
-    uh, up = args.upstream.rsplit(":", 1)
-    sign_sk = load_sign_sk(args.id_key)
-    gate = Gate(args.max_conns, args.per_ip_per_min)
-    udp_gate = Gate(args.udp_max_sessions, args.udp_per_ip_per_min)
-    raise_fd_limit(args.udp_max_sessions, args.max_conns)
-    # A restarted shim has no live TCP connections from the previous run.
-    _publish_discovery("reset", "*")
+def _split(hostport: str) -> tuple[str, int]:
+    host, port = hostport.rsplit(":", 1)
+    return host, int(port)
+
+
+async def serve(
+    listen: str,
+    upstream: str,
+    id_key: str,
+    *,
+    max_conns: int = MAX_CONNS,
+    per_ip_per_min: int = MAX_CONNS_PER_MIN_PER_IP,
+    udp_max_sessions: int = UDP_MAX_SESSIONS,
+    udp_per_ip_per_min: int = UDP_NEW_PER_IP_PER_MIN,
+    diag: bool = False,
+    stop: threading.Event | None = None,
+) -> None:
+    """TCP KX proxy + UDP relay on one port until cancelled or `stop` is set.
+
+    Used by both the in-process supervisor and `python -m app.shim.shim`.
+    TCP and UDP have separate budgets: ~800 devices are ~800 UDP sessions.
+    """
+    host, port = _split(listen)
+    up = _split(upstream)
+    sign_sk = load_sign_sk(id_key)
+    gate = Gate(max_conns, per_ip_per_min)
+    udp_gate = Gate(udp_max_sessions, udp_per_ip_per_min)
+    raise_fd_limit(udp_max_sessions, max_conns)
     log.info("signing with hbbs key (pub=%s…)", base64.b64encode(sign_sk[32:]).decode()[:12])
-    relay = UdpRelay((uh, int(up)), udp_gate)
-    await relay.start(host, int(port))
-    srv = await asyncio.start_server(
-        lambda r, w: handle(r, w, (uh, int(up)), sign_sk, gate), host, int(port))
-    log.info("listening %s -> upstream %s", args.listen, args.upstream)
+    relay = UdpRelay(up, udp_gate)
+    await relay.start(host, port)
+    srv = await asyncio.start_server(lambda r, w: handle(r, w, up, sign_sk, gate, diag), host, port)
+    log.info("shim listening %s -> upstream %s", listen, upstream)
     try:
         async with srv:
-            await srv.serve_forever()
+            if stop is None:
+                await srv.serve_forever()
+            else:
+                while not stop.is_set():
+                    await asyncio.sleep(0.2)
     finally:
         await relay.aclose()
 
 
+async def amain(args):
+    # A restarted standalone shim has no live TCP connections from its
+    # previous run (in-process, the API resets `online` at startup instead).
+    _publish_discovery("reset", "*")
+    await serve(args.listen, args.upstream, args.id_key, max_conns=args.max_conns,
+                per_ip_per_min=args.per_ip_per_min, udp_max_sessions=args.udp_max_sessions,
+                udp_per_ip_per_min=args.udp_per_ip_per_min, diag=args.diag)
+
+
 def build_parser():
-    import argparse as _ap
-    ap = _ap.ArgumentParser(prog="app.shim")
+    ap = argparse.ArgumentParser(prog="app.shim")
     ap.add_argument("--listen", default="127.0.0.1:21116")
     # NOTE: the relay port (hbbs 21117) speaks a different protocol — upstream
     # must be the hbbs *rendezvous* port (moved with `hbbs -p`, e.g. 21166).
@@ -843,12 +862,13 @@ def build_parser():
     ap.add_argument("--per-ip-per-min", type=int, default=MAX_CONNS_PER_MIN_PER_IP)
     ap.add_argument("--udp-max-sessions", type=int, default=UDP_MAX_SESSIONS)
     ap.add_argument("--udp-per-ip-per-min", type=int, default=UDP_NEW_PER_IP_PER_MIN)
+    ap.add_argument("--diag", action="store_true",
+                    help="log decrypted message types + target ids (never tokens/keys)")
     return ap
 
 
 def main(argv=None):
-    import asyncio as _aio
-    _aio.run(amain(build_parser().parse_args(argv)))
+    asyncio.run(amain(build_parser().parse_args(argv)))
 
 
 if __name__ == "__main__":

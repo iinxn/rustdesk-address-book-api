@@ -242,7 +242,7 @@ def test_udp_budget_is_independent_from_tcp_gate():
 
 def test_udp_full_table_evicts_unconfirmed_first():
     async def steps(relay):
-        a, b, c, d, e = (("203.0.113.%d" % i, 4000) for i in range(1, 6))
+        a, b, c, d, e = ((f"203.0.113.{i}", 4000) for i in range(1, 6))
         for addr in (a, b, c):
             relay._on_datagram(b"x", addr)
         relay._on_datagram(b"y", a)          # a re-registers: confirmed

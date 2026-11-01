@@ -2,8 +2,11 @@
 
 ## 1. Фактическое состояние
 
-Автотесты есть для heartbeat rate limiting, sysinfo write-once,
-`display_name` и audit log; полного покрытия нет.
+Автотесты есть для контрактов `/api/*` и `/api/v1/*`, прав книг, heartbeat,
+sysinfo, `display_name`, audit log, журнала подключений и исправлений аудита
+безопасности; полного покрытия нет (SPA и shim-протокол — вручную).
+Состояние на 2026-10-31: `pytest -q` — 99 passed, 2 skipped (load-тесты),
+`RUN_LOAD_TESTS=1 pytest tests/test_heartbeat_rate_limit.py` — 14 passed.
 
 - `tests/test_heartbeat_rate_limit.py` — обычный heartbeat, 800 устройств за
   одним IP, независимые bucket'ы, реальное превышение лимита, повторные
@@ -42,11 +45,40 @@
   принимается, `Secure` только на HTTPS; UDP-relay шима: свой бюджет на IP,
   при полной таблице вытесняется самая старая неподтверждённая сессия,
   неподтверждённые истекают через 30 с.
+- `tests/test_api_contracts.py` — характеризационные тесты, написанные
+  **до** рефакторинга 2026-10-31 и проходящие на старом и новом коде:
+  точные формы `/api/login`, `/api/currentUser`, `/api/ab/*` (peers personal
+  vs shared, пагинация, теги, коды и тексты ошибок, пустые `200`),
+  заглушки; `/api/v1` — ключи `entry_out`, сортировки/фильтры/пагинация
+  листинга, stats/книги со счётчиками presence, CRUD записей и тегов,
+  bulk с частичным успехом, discovered/device-info, admin-only маршруты;
+  legacy-панель (вход, формы, фильтр тегов); права rule 1/2/нет доступа.
+- `tests/test_refactor_regressions.py` — дефекты, найденные при
+  рефакторинге (каждый тест падает на коде до него): admin не видит чужие
+  personal-книги (SEC-026), `?book=` панели проверяется (SEC-027),
+  `MAX_PEER_ONE_AB` на всех путях, валидация цвета тега (SEC-004),
+  не-объект JSON → `400`, chunked-тело ограничено (SEC-013), 200
+  параллельных heartbeat через групповой commit сохраняются все.
 - `tests/conftest.py` поднимает временную SQLite и применяет Alembic
   `upgrade head`; `data/` не используется.
 - `pytest`/`httpx` вынесены в `requirements-dev.txt`, не в runtime.
-- Остальные области (auth, права книг, миграции, SPA) автотестами не
-  покрыты. `.pytest_cache/` — кеш, а не доказательство покрытия.
+- Не покрыты автотестами: SPA (только `npm run build`/`lint`), TCP-протокол
+  шима с живым клиентом, миграции кроме `0004→head` (проверяются на копии
+  БД, §6). `.pytest_cache/` — кеш, а не доказательство покрытия.
+
+### 1.1. Как мерить производительность
+
+- `httpx.AsyncClient` при десятках одновременных запросов сам упирается в
+  ~190 запр/с (LESSONS_LEARNED §16) — не используй его для оценки
+  пропускной способности. Сначала прогони генератор против пустого ASGI-app.
+- Схема, которой пользовались 2026-10-31: временная БД с сидом 800 устройств
+  (две книги, 20 тегов, по 3 тега на запись, `device_info`, discovered),
+  `uvicorn app.main:app` на loopback, свой keep-alive клиент на asyncio для
+  heartbeat (64 и 200 соединений × 4 круга по 800 ID) и параллельный опрос
+  `GET /api/v1/address-books/{bid}/entries`. Старая версия для сравнения —
+  `git archive HEAD` во временный каталог, тот же сид и тот же генератор.
+- Результаты и интерпретация — DEC-020; цифры относятся к одной машине
+  (4 ядра, loopback) и не являются SLA.
 
 Не заявляй «тесты пройдены», если ты их не запускал. Не добавляй фиктивный
 `pytest.ini` ради зелёного отчёта.
@@ -376,7 +408,8 @@ DEV_MODE=1 DATABASE_URL=sqlite:////tmp/opencode/rd-test/test.db \
 Проверяй на копии, не на `data/base.db`:
 
 ```bash
-cp data/base.db /tmp/opencode/rd-test/copy.db
+# копия через Backup API: БД в режиме WAL, простой cp может пропустить -wal
+.venv/bin/python -m app.cli backup --dest /tmp/opencode/rd-test/copy.db
 DATABASE_URL=sqlite:////tmp/opencode/rd-test/copy.db DEV_MODE=1 \
   .venv/bin/alembic -c alembic.ini upgrade head
 DATABASE_URL=sqlite:////tmp/opencode/rd-test/copy.db DEV_MODE=1 \

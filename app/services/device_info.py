@@ -15,11 +15,12 @@ from __future__ import annotations
 import re
 import threading
 import time
-from datetime import datetime
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.timeutil import iso, utcnow
 from app.models.models import AddressBookEntry, DeviceInfo, DiscoveredDevice
 
 SYSINFO_VER = "1"
@@ -57,8 +58,8 @@ def _text(payload: dict, key: str, limit: int) -> str | None:
     return value.strip()[:limit]
 
 
-def parse_cpu(raw: str) -> dict:
-    out = {"cpu_model": "", "cpu_freq_ghz": None, "cpu_logical": None, "cpu_physical": None}
+def parse_cpu(raw: str) -> dict[str, Any]:
+    out: dict[str, Any] = {"cpu_model": "", "cpu_freq_ghz": None, "cpu_logical": None, "cpu_physical": None}
     s = (raw or "").strip()
     m = _CPU_RE.match(s) or _CPU_CORES_RE.match(s)
     if not m:
@@ -84,7 +85,7 @@ def parse_memory(raw: str) -> float | None:
     return value if value > 0 else None
 
 
-def parse_os(raw: str) -> dict:
+def parse_os(raw: str) -> dict[str, str]:
     s = (raw or "").strip()
     out = {"os_name": "", "os_version": ""}
     if not s:
@@ -190,22 +191,9 @@ def save_sysinfo(
 
     if ip:
         row.ip = ip[:64]
-    row.collected_at = datetime.utcnow()
+    row.collected_at = utcnow()
     db.commit()
     return True
-
-
-def record_heartbeat(db: Session, rustdesk_id: str, version: str = "", ip: str = "") -> None:
-    """Track liveness of the API channel (does not create an info row)."""
-    row = db.get(DeviceInfo, rustdesk_id)
-    if row is None:
-        return
-    row.last_heartbeat_at = datetime.utcnow()
-    if version:
-        row.version = version[:32]
-    if ip:
-        row.ip = ip[:64]
-    db.commit()
 
 
 def request_refresh(rustdesk_id: str) -> None:
@@ -254,10 +242,6 @@ def reset_refresh_state() -> None:
         _approved.clear()
 
 
-def _iso(value: datetime | None) -> str | None:
-    return value.isoformat() if value else None
-
-
 def info_out(info: DeviceInfo | None) -> dict | None:
     if info is None:
         return None
@@ -277,6 +261,6 @@ def info_out(info: DeviceInfo | None) -> dict | None:
         "memory_gb": info.memory_gb,
         "version": info.version,
         "ip": info.ip,
-        "collected_at": _iso(info.collected_at),
-        "last_heartbeat_at": _iso(info.last_heartbeat_at),
+        "collected_at": iso(info.collected_at),
+        "last_heartbeat_at": iso(info.last_heartbeat_at),
     }

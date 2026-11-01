@@ -17,7 +17,7 @@ Design decisions (see `docs/knowledge/DECISIONS.md` DEC-017):
   cannot be written the transaction fails and the API returns 500 — a
   security-relevant change must never commit silently without a trace.
 * Access events, authentication failures and device-state transitions are
-  written **best-effort** (`write_event()` / `write_events()` with their own
+  written **best-effort** (`write_event()`, with its own
   session): they must not turn a successful request into a failure, and a
   failure there is logged loudly.
 * Heartbeats and sysinfo uploads are excluded by the middleware. A single
@@ -37,16 +37,16 @@ import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Iterable
+from typing import Any
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.timeutil import iso, utcnow
 from app.db.session import SessionLocal
-from app.models.models import AuditEvent
-from app.models.models import Session as SessionModel
-from app.models.models import User
+from app.models.models import AuditEvent, User
+from app.services.auth import peek_user_by_token
 
 log = logging.getLogger("app.audit")
 
@@ -79,7 +79,7 @@ _warned_retention: set[str] = set()
 
 # --- request context -------------------------------------------------------
 
-@dataclass
+@dataclass(frozen=True)
 class RequestContext:
     request_id: str = ""
     source_ip: str = ""
@@ -88,7 +88,7 @@ class RequestContext:
     route: str = ""
 
 
-_ctx: ContextVar[RequestContext] = ContextVar("audit_request_context", default=RequestContext())
+_ctx: ContextVar[RequestContext] = ContextVar("audit_request_context", default=RequestContext())  # noqa: B039 - frozen
 
 
 def set_request_context(ctx: RequestContext):
@@ -97,10 +97,6 @@ def set_request_context(ctx: RequestContext):
 
 def reset_request_context(token) -> None:
     _ctx.reset(token)
-
-
-def current_request_id() -> str:
-    return _ctx.get().request_id
 
 
 def new_request_id() -> str:
@@ -231,7 +227,7 @@ def record(
 
     ctx = _ctx.get()
     event = AuditEvent(
-        timestamp=timestamp or datetime.utcnow(),
+        timestamp=timestamp or utcnow(),
         category=category if category in CATEGORIES else "system",
         event_type=clean_text(event_type, 48) or "unknown",
         actor_type=actor_type if actor_type in ACTOR_TYPES else "system",
@@ -269,41 +265,18 @@ def write_event(**kwargs) -> bool:
         return False
 
 
-def write_events(items: Iterable[dict]) -> int:
-    """Best-effort batch write; one failing batch is logged, not raised."""
-    written = 0
-    try:
-        with SessionLocal() as db:
-            for kwargs in items:
-                if record(db, **kwargs) is not None:
-                    written += 1
-            db.commit()
-    except Exception as exc:  # noqa: BLE001
-        log.error("audit batch write failed (%s)", type(exc).__name__)
-        return 0
-    return written
-
-
-def user_for_token(db: Session, token: str) -> User | None:
-    """Read-only actor lookup for the access middleware (never mutates)."""
-    if not token:
-        return None
-    s = db.scalar(select(SessionModel).where(SessionModel.token == token))
-    if s is None:
-        return None
-    if s.expires_at is not None and s.expires_at < datetime.utcnow():
-        return None
-    user = db.get(User, s.user_id)
-    if user is None or user.is_disabled:
-        return None
-    return user
+# Status codes that are security signals rather than ordinary request results.
+_ACCESS_KIND = {
+    401: ("security", "access.unauthenticated", "denied"),
+    403: ("security", "access.denied", "denied"),
+    429: ("security", "security.rate_limited", "denied"),
+}
 
 
 def write_access(
     *,
     method: str,
     route: str,
-    path: str,
     status_code: int,
     duration_ms: int,
     request_id: str,
@@ -314,19 +287,11 @@ def write_access(
     """One access/security row for a significant API request."""
     try:
         with SessionLocal() as db:
-            actor = user_for_token(db, token)
-            if status_code == 401:
-                category, event_type, outcome = "security", "access.unauthenticated", "denied"
-            elif status_code == 403:
-                category, event_type, outcome = "security", "access.denied", "denied"
-            elif status_code == 429:
-                category, event_type, outcome = "security", "security.rate_limited", "denied"
-            elif status_code >= 500:
-                category, event_type, outcome = "access", "api.request", "error"
-            elif status_code >= 400:
-                category, event_type, outcome = "access", "api.request", "error"
-            else:
-                category, event_type, outcome = "access", "api.request", "success"
+            actor = peek_user_by_token(db, token) if token else None
+            category, event_type, outcome = _ACCESS_KIND.get(
+                status_code,
+                ("access", "api.request", "error" if status_code >= 400 else "success"),
+            )
 
             target_type, target_id = target_from_params(params)
             record(
@@ -403,8 +368,8 @@ def note_rate_limited(route: str, ip: str, retry_after: int = 0, audit_it: bool 
             _LIMIT_STATE[key] = (now, 0, "")
             do_log = True
         if len(_LIMIT_STATE) > _LIMIT_MAX_KEYS:
-            for k in [k for k, (ts, _, _) in _LIMIT_STATE.items() if now - ts > _LIMIT_LOG_SEC]:
-                _LIMIT_STATE.pop(k, None)
+            for stale in [k for k, (ts, _, _) in _LIMIT_STATE.items() if now - ts > _LIMIT_LOG_SEC]:
+                _LIMIT_STATE.pop(stale, None)
 
         do_audit = False
         if audit_it:
@@ -414,9 +379,9 @@ def note_rate_limited(route: str, ip: str, retry_after: int = 0, audit_it: bool 
                 _LIMIT_AUDIT[audit_key] = now
                 do_audit = True
             if len(_LIMIT_AUDIT) > _LIMIT_MAX_KEYS:
-                for k, ts in list(_LIMIT_AUDIT.items()):
+                for akey, ts in list(_LIMIT_AUDIT.items()):
                     if now - ts >= _LIMIT_AUDIT_SEC:
-                        _LIMIT_AUDIT.pop(k, None)
+                        _LIMIT_AUDIT.pop(akey, None)
 
     if do_log:
         log.warning(
@@ -435,13 +400,6 @@ def note_rate_limited(route: str, ip: str, retry_after: int = 0, audit_it: bool 
             status_code=429,
             details={"route": route, "retry_after": retry_after},
         )
-
-
-def reset_rate_limit_diagnostics() -> None:
-    """Test hook: forget throttling state."""
-    with _LIMIT_LOCK:
-        _LIMIT_STATE.clear()
-        _LIMIT_AUDIT.clear()
 
 
 # --- retention -------------------------------------------------------------
@@ -481,7 +439,7 @@ def cleanup_once(now: datetime | None = None) -> dict:
         return {"skipped": True, "deleted": 0}
     started = time.monotonic()
     days = retention_days()
-    cutoff = (now or datetime.utcnow()) - timedelta(days=days)
+    cutoff = (now or utcnow()) - timedelta(days=days)
     deleted = 0
     try:
         with SessionLocal() as db:
@@ -532,7 +490,7 @@ def cleanup_once(now: datetime | None = None) -> dict:
 def serialize(event: AuditEvent) -> dict:
     return {
         "id": event.id,
-        "timestamp": event.timestamp.isoformat() if event.timestamp else None,
+        "timestamp": iso(event.timestamp),
         "category": event.category,
         "event_type": event.event_type,
         "actor_type": event.actor_type,

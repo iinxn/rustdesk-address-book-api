@@ -14,19 +14,15 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
-    func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.core.timeutil import utcnow
 from app.db.base import Base
 
 
 def new_uuid() -> str:
     return str(uuid.uuid4())
-
-
-def utcnow() -> datetime:
-    return datetime.utcnow()
 
 
 class User(Base):

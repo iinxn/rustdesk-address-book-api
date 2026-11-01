@@ -139,17 +139,16 @@ curl -X POST http://127.0.0.1:8000/api/ab/personal \
 ```mermaid
 flowchart LR
     C[RustDesk client<br/>без изменений]
-    C -->|HTTP/HTTPS :8000<br/>/api/* : Bearer token| API[FastAPI app<br/>роутеры rustdesk/webapi/panel]
+    C -->|HTTP/HTTPS :8000<br/>/api/* : Bearer token| API[FastAPI app<br/>роутеры rustdesk/api.v1/panel]
     C -->|TCP+UDP 21116<br/>KX/secure, plain, дейтаграммы| SHIM[KX shim<br/>поток под надзором]
     SHIM -->|расшифрованный protobuf<br/>SHIM_UPSTREAM| HBBS[настоящий hbbs rendezvous]
     C -->|/app/ :8000| SPA[Web Panel dist/]
-    API -->|SQLAlchemy 2.x<br/>FK ON, busy_timeout 5000| DB[(SQLite data/base.db<br/>Alembic 0001-0006)]
+    API -->|SQLAlchemy 2.x<br/>FK ON, busy_timeout 5000, WAL| DB[(SQLite data/base.db<br/>Alembic 0001-0006)]
 ```
 
 Путь запроса: `POST /api/login` → opaque серверный токен (`sessions`, срок
 `SESSION_DAYS`; logout удаляет) → `POST /api/ab/*` с `Authorization: Bearer`
-(доступ к книге перепроверяется при каждом запросе: `get_book_for_user` +
-`rule_for`) → устройства шлют `POST /api/heartbeat {id,…}`, штампуется
+(доступ к книге перепроверяется при каждом запросе: `ab.book_access`) → устройства шлют `POST /api/heartbeat {id,…}`, штампуется
 `last_seen` (вывод: `online` ≤ 45 с, иначе `offline`, не виденные — `unknown`)
 → SPA панели ходит в `/api/v1/*` с тем же токеном из `localStorage`
 (`ab_token`).

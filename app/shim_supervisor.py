@@ -40,39 +40,25 @@ class ShimSupervisor:
         if self.alive:
             return
         self._stop.clear()
+        self._spawn()
+
+    def _spawn(self) -> None:
         self.state = "running"
         self._thread = threading.Thread(target=self._serve, name="kx-shim", daemon=True)
         self._thread.start()
 
     def _serve(self) -> None:
         from app.shim import shim as shim_mod
-        host, port = self.listen.rsplit(":", 1)
-        uh, up = self.upstream.rsplit(":", 1)
         try:
-            sign_sk = shim_mod.load_sign_sk(self.id_key)
-            gate = shim_mod.Gate(self.max_conns, self.per_ip_per_min)
-            # UDP gets its own budget: ~800 devices are ~800 live sessions.
-            udp_gate = shim_mod.Gate(self.udp_max_sessions, self.udp_per_ip_per_min)
-            shim_mod.raise_fd_limit(self.udp_max_sessions, self.max_conns)
-
-            async def _run():
-                relay = shim_mod.UdpRelay((uh, int(up)), udp_gate)
-                await relay.start(host, int(port))
-                srv = await asyncio.start_server(
-                    lambda r, w: shim_mod.handle(
-                        r, w, (uh, int(up)), sign_sk, gate, self.diag_msgtypes),
-                    host, int(port))
-                log.info("shim listening %s -> %s", self.listen, self.upstream)
-                async with srv:
-                    while not self._stop.is_set():
-                        await asyncio.sleep(0.2)
-                    srv.close()
-                    await srv.wait_closed()
-                    await relay.aclose()
-
-            asyncio.run(_run())
+            asyncio.run(shim_mod.serve(
+                self.listen, self.upstream, self.id_key,
+                max_conns=self.max_conns, per_ip_per_min=self.per_ip_per_min,
+                udp_max_sessions=self.udp_max_sessions,
+                udp_per_ip_per_min=self.udp_per_ip_per_min,
+                diag=self.diag_msgtypes, stop=self._stop,
+            ))
             self.state = "stopped"
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - any crash is recorded and retried by watch()
             log.error("shim exited: %r", e)
             now = time.monotonic()
             self._fail_times = [t for t in self._fail_times if now - t < RESTART_WINDOW]
@@ -94,9 +80,7 @@ class ShimSupervisor:
             log.info("shim: restart #%d in %ss", self._restarts, delay)
             await asyncio.sleep(delay)
             if not self._stop.is_set():
-                self.state = "running"
-                self._thread = threading.Thread(target=self._serve, name="kx-shim", daemon=True)
-                self._thread.start()
+                self._spawn()
 
     def stop(self, timeout: float = 10) -> None:
         self._stop.set()

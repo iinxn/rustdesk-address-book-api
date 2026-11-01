@@ -1,14 +1,21 @@
-"""AuthService: users + opaque sessions."""
+"""AuthService: users, password checks and opaque sessions.
+
+One `sessions` table backs both entry points: Bearer tokens (RustDesk client
+and SPA) and the legacy panel cookie, which carries only a session id. Every
+lookup goes through `_live_user()`, so expiry and `is_disabled` are enforced
+identically everywhere (SEC-001/007).
+"""
 import asyncio
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.security import hash_password, new_token, password_error, verify_password
+from app.core.timeutil import utcnow
 from app.models.models import AddressBook, Session as SessionModel, User
 
 DISPLAY_NAME_MAX = 128
@@ -125,7 +132,7 @@ def create_session(db: Session, user: User, device_id: str = "") -> SessionModel
     purge_expired_sessions(db)  # keep the table from growing (SEC-007/019)
     expires = None
     if settings.session_days > 0:
-        expires = datetime.utcnow() + timedelta(days=settings.session_days)
+        expires = utcnow() + timedelta(days=settings.session_days)
     s = SessionModel(
         user_id=user.id,
         token=new_token(),
@@ -138,11 +145,18 @@ def create_session(db: Session, user: User, device_id: str = "") -> SessionModel
     return s
 
 
+def set_password(db: Session, user: User, password: str) -> None:
+    """Rotate the password hash; the caller revokes sessions and commits."""
+    if (problem := password_error(password)) is not None:
+        raise ValueError(problem)
+    user.password_hash = hash_password(password)
+
+
 def destroy_user_sessions(db: Session, user_id: str) -> int:
     """Revoke every live token of a user (disable or password rotation).
 
     SEC-007: a password change / account disable must invalidate existing
-    Bearer sessions, not only the one that made the request."""
+    Bearer sessions and panel cookies, not only the one that made the request."""
     res = db.execute(delete(SessionModel).where(SessionModel.user_id == user_id))
     db.commit()
     return res.rowcount or 0
@@ -153,20 +167,25 @@ def purge_expired_sessions(db: Session) -> int:
     res = db.execute(
         delete(SessionModel).where(
             SessionModel.expires_at.is_not(None),
-            SessionModel.expires_at < datetime.utcnow(),
+            SessionModel.expires_at < utcnow(),
         )
     )
     db.commit()
     return res.rowcount or 0
 
 
-def user_by_token(db: Session, token: str) -> User | None:
-    s = db.scalar(select(SessionModel).where(SessionModel.token == token))
+def session_expired(s: SessionModel) -> bool:
+    return s.expires_at is not None and s.expires_at < utcnow()
+
+
+def _live_user(db: Session, s: SessionModel | None, *, purge: bool) -> User | None:
+    """Active user behind a session row; expired rows are deleted when `purge`."""
     if s is None:
         return None
-    if s.expires_at is not None and s.expires_at < datetime.utcnow():
-        db.delete(s)
-        db.commit()
+    if session_expired(s):
+        if purge:
+            db.delete(s)
+            db.commit()
         return None
     user = db.get(User, s.user_id)
     if user is None or user.is_disabled:
@@ -174,8 +193,33 @@ def user_by_token(db: Session, token: str) -> User | None:
     return user
 
 
+def _by_token(db: Session, token: str) -> SessionModel | None:
+    if not token:
+        return None
+    return db.scalar(select(SessionModel).where(SessionModel.token == token))
+
+
+def user_by_token(db: Session, token: str) -> User | None:
+    """Bearer authentication; an expired token is removed on first use."""
+    return _live_user(db, _by_token(db, token), purge=True)
+
+
+def peek_user_by_token(db: Session, token: str) -> User | None:
+    """Read-only variant for the access log: never mutates the database."""
+    return _live_user(db, _by_token(db, token), purge=False)
+
+
+def panel_session(db: Session, session_id: object) -> tuple[SessionModel, User] | None:
+    """Session row + user behind a panel cookie (`sid`), or None."""
+    if not session_id or not isinstance(session_id, str):
+        return None
+    s = db.get(SessionModel, session_id)
+    user = _live_user(db, s, purge=True)
+    return (s, user) if s is not None and user is not None else None
+
+
 def destroy_session(db: Session, token: str) -> None:
-    s = db.scalar(select(SessionModel).where(SessionModel.token == token))
+    s = _by_token(db, token)
     if s is not None:
         db.delete(s)
         db.commit()

@@ -10,26 +10,32 @@ Semantics (deliberately honest):
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.timeutil import utc_from_timestamp, utcnow
 from app.core.validators import validate_rustdesk_id
 from app.models.models import DiscoveredDevice
 from app.services import audit as audit_svc
 from app.services import connections as connection_svc
 from app.services import discovery_events
 
+log = logging.getLogger(__name__)
+
 MAX_SEEN = 2_147_483_647
 
 
 def _dt(ts: float | None) -> datetime:
+    if ts is None:
+        return utcnow()
     try:
-        return datetime.utcfromtimestamp(float(ts))
-    except (TypeError, ValueError, OSError):
-        return datetime.utcnow()
+        return utc_from_timestamp(float(ts))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return utcnow()
 
 
 def _merge_source(old: str, new: str) -> str:
@@ -66,13 +72,27 @@ def _transition(
         "destination": "shim",
         "target_type": "device" if rid else "",
         "target_id": rid,
-        "timestamp": when or datetime.utcnow(),
+        "timestamp": when or utcnow(),
         "details": {**(details or {}), "source": source} if source else (details or {}),
         "flush": False,
     }
 
 
+_reported_drops = 0
+
+
+def _report_drops() -> None:
+    """The queue drops on overflow (bounded memory); say so instead of hiding it."""
+    global _reported_drops
+    dropped = discovery_events.dropped_count()
+    if dropped > _reported_drops:
+        log.warning("discovery queue overflowed: %d event(s) dropped since start",
+                    dropped)
+        _reported_drops = dropped
+
+
 def drain_once(db: Session, max_items: int = 5_000) -> int:
+    _report_drops()
     events = discovery_events.drain(max_items)
 
     rows: dict[str, DiscoveredDevice] = {}
@@ -86,7 +106,7 @@ def drain_once(db: Session, max_items: int = 5_000) -> int:
             rows.clear()
             transitions.append(_transition(
                 category="system", event_type="system.shim_reset",
-                when=datetime.utcnow(),
+                when=utcnow(),
                 details={"reason": "shim reset"},
             ))
             continue
@@ -176,7 +196,7 @@ def drain_once(db: Session, max_items: int = 5_000) -> int:
     # This must run even when the queue is empty: otherwise a row that went
     # silent after its last event could stay online forever. Only real
     # online -> offline transitions are recorded, not every heartbeat.
-    cutoff = datetime.utcnow() - timedelta(seconds=max(30, settings.discovery_online_sec))
+    cutoff = utcnow() - timedelta(seconds=max(30, settings.discovery_online_sec))
     stale = list(db.scalars(
         select(DiscoveredDevice).where(
             DiscoveredDevice.online.is_(True),

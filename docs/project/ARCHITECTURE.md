@@ -43,7 +43,7 @@ flowchart LR
     LEG[Legacy panel<br/>/panel/]
     API[FastAPI<br/>app/main.py]
     RS[rustdesk router<br/>/api/*]
-    V1[webapi router<br/>/api/v1/*]
+    V1[api.v1 routers<br/>/api/v1/*]
     PNL[panel router]
     SVC[services<br/>ab/auth/presence/device_info/discovery/audit]
     DB[(SQLite<br/>Alembic 0001–0006)]
@@ -103,10 +103,27 @@ Uvicorn
   → AuditMiddleware (X-Request-ID, context, значимые access/security-события)
   → PanelSessionMiddleware (cookie, WEB_SECRET, SameSite=Lax, Secure на HTTPS)
   → RateLimitMiddleware (per-IP для /api/login, /panel/login, sysinfo; per-device + aggregate per-IP для heartbeat)
-  → BodyCapMiddleware (Content-Length > MAX_BODY_BYTES → 413)
-  → router (rustdesk → webapi → panel)
+  → BodyCapMiddleware (Content-Length > MAX_BODY_BYTES → 413; chunked-тело буферизуется до того же лимита)
+  → router (rustdesk → api.v1 → panel)
   → dependency get_db() (SQLAlchemy Session на запрос; heartbeat и sysinfo — своя сессия в threadpool)
 ```
+
+Все middleware — чистые ASGI-классы (не `BaseHTTPMiddleware`): нет лишней
+задачи и memory stream на каждый слой, а access-строка аудита пишется уже
+**после** отправки ответа и не добавляет клиенту задержку (DEC-020).
+
+Модель выполнения роутов:
+
+- роуты, которые ходят в SQLite, объявлены как `def`: FastAPI выполняет их в
+  threadpool, event loop не блокируется синхронным драйвером (до 2026-10-31
+  `/api/ab/*` были `async def` и выполняли запросы прямо в loop);
+- тело свободной формы для таких роутов читает async-зависимость
+  `deps.json_body` (возвращает маркер `BAD_JSON`, а не исключение — порядок
+  проверок 404 → 403 → 400 сохраняется);
+- `async def` остались только у `/api/login` (bcrypt в своём пуле),
+  `/api/heartbeat` и `/api/sysinfo` (запись в threadpool) и у заглушек без БД;
+- ошибки бросаются как `ClientError` (`{"error": ...}`) или `PanelError`
+  (`{"detail": ...}`) из `app/api/errors.py`.
 
 Особенности:
 
@@ -116,20 +133,19 @@ Uvicorn
   в 60 с, чтобы per-device bucket'ы не росли безгранично.
 - Heartbeat читает маленькое тело (≤8 KiB и только при наличии
   `Content-Length`), чтобы получить `id` для ключа; иначе остаётся только
-  IP-потолок. Прочитанное тело кешируется Starlette и не читается повторно.
-- `/api/heartbeat` выполняет SQLite-запись в threadpool (`run_in_threadpool`)
-  со своей сессией: синхронный драйвер не должен блокировать event loop при
-  всплеске подключений.
-- `BodyCapMiddleware` проверяет только `Content-Length`; chunked-запрос без
-  длины не ограничивается этим middleware (см. SEC-013), но heartbeat всё
-  равно упирается в агрегатный IP-лимит.
+  IP-потолок. Прочитанное тело передаётся роуту повторно (replay `receive`).
+- `/api/heartbeat` выполняет SQLite-запись в threadpool через
+  `presence.HeartbeatWriter` — групповой commit, см. §7.1.
+- `BodyCapMiddleware`: при `Content-Length` — отказ до чтения тела; без
+  длины (chunked) тело буферизуется не более `MAX_BODY_BYTES` и только потом
+  передаётся приложению, иначе `413` (SEC-013 закрыт).
 - `client_ip()` использует прямой peer; `X-Forwarded-For` читается только
   если прямой peer входит в `TRUSTED_PROXIES`, и только для ключа лимита.
 - `HITS` — in-memory и per-process. `python -m app` запускает один uvicorn
   worker; при нескольких процессах лимиты умножатся. Внешний store для
   счётчиков пока не реализован.
-- `SessionMiddleware` нужен только legacy-панели; Bearer-токены SPA/клиента
-  к cookie не привязаны.
+- `PanelSessionMiddleware` нужен только legacy-панели; Bearer-токены
+  SPA/клиента к cookie не привязаны.
 - `AuditMiddleware` — внешний слой: назначает `X-Request-ID`, кладёт
   `request_id`/`source_ip`/маршрут в `contextvar` и после ответа пишет
   access/security-строку только для значимых запросов (мутации, 4xx/5xx,
@@ -201,15 +217,23 @@ sequenceDiagram
 
 ## 6. Авторизация книг
 
-`app/services/ab.py` — единственный источник правил:
+`app/services/ab.py` — единственный источник правил. `book_access(db,
+user, book)` возвращает `BookAccess(book, rule)` или `None`;
+`visible_books()` применяет **то же** правило к списку, поэтому книга,
+видимая в списке, всегда открывается, и наоборот:
 
-| Ситуация | `get_book_for_user` | `rule_for` |
+| Ситуация | `book_access` | `rule` |
 |---|---|---|
 | personal, владелец | доступ | 3 |
-| shared + строка `address_book_permissions` | доступ | `perm.rule` (1/2/3) |
+| любая книга + строка `address_book_permissions` | доступ | `perm.rule` (1/2/3) |
 | shared + admin | доступ | 3 |
-| personal чужого пользователя | нет | 0 |
-| shared без permission, не admin | нет | 0 |
+| personal чужого пользователя (в т. ч. для admin) | `None` | — |
+| shared без permission, не admin | `None` | — |
+
+До 2026-10-31 списки (`/api/v1/address-books`, stats, `in_books`,
+device-info, legacy `?book=`) строились отдельным кодом: admin видел чужие
+personal-книги с `rule=0`, а legacy-панель не проверяла `?book=` вовсе
+(SEC-026/027).
 
 `can_write(rule) = rule >= 2`. Чтение (list/get/export) требует доступа к
 книге; создание/изменение/удаление — `can_write`; rename/delete shared-книги
@@ -230,12 +254,22 @@ sequenceDiagram
     participant I as device_info service
     participant DB as SQLite
     D->>H: {id, uuid, ver, ...} (без auth)
-    H->>P: record_heartbeat(id)
-    P->>DB: UPDATE entries SET last_seen=utcnow WHERE rustdesk_id=id
-    H->>I: record_heartbeat(id, ver, ip)
-    I->>DB: UPDATE device_info.last_heartbeat_at (если строка есть)
+    H->>P: threadpool: HeartbeatWriter.record(id, ver, ip)
+    P->>DB: одна транзакция на пачку: executemany UPDATE entries.last_seen + UPDATE device_info
+    H->>I: take_refresh(id) (память)
     H-->>D: {} или {"sysinfo": true}
 ```
+
+- **Групповой commit.** Раньше каждый heartbeat был отдельной транзакцией
+  (2 `commit` = 2 fsync) и запросы ждали друг друга в busy-handler SQLite с
+  back-off до 100 мс; это давало секундные хвосты при возвращении парка.
+  Теперь параллельные вызовы складывают обновление в `_pending`, а тот, кто
+  держит write-lock, коммитит всё накопленное одной транзакцией; остальные
+  возвращаются без записи. При низкой нагрузке пачка = 1 строка без
+  ожидания. Ответ уходит только после commit своей пачки. Ошибка пачки
+  логируется и поднимается у «лидера»; остальные heartbeat-ы этой пачки
+  потеряны (это liveness, устройство повторит через 15 с).
+- `updated_at` записи heartbeat не меняет (это не редактирование).
 
 - `status_of()`: нет `last_seen` → `unknown`; `now - last_seen <= 45s` →
   `online`; иначе `offline`.
@@ -493,7 +527,8 @@ plaintext `:8080` на один backend. Для production plaintext-блок н
 
 ## 14. Инварианты, которые легко сломать
 
-- Не переносить проверку прав из `get_book_for_user`/`rule_for` в клиент.
+- Не переносить проверку прав из `ab.book_access`/`visible_books` в клиент и
+  не строить списки книг в обход `visible_books()`.
 - Не смешивать `presence`, `discovered_devices` и `device_info`: это три
   независимых источника с разной семантикой.
 - Не считать `discovered` доказательством того, что устройство принадлежит
