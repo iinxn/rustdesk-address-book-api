@@ -19,3 +19,6 @@ Dockerfile
 .secrets.env
 rustdesk.json
 SECURITY_AUDIT.md
+
+# Local AI-agent skills (OpenCode); not published
+.opencode/
