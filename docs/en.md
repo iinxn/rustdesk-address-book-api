@@ -38,10 +38,8 @@ Components and responsibilities:
   clients pass through untouched.
 - **Storage** — one SQLite database at `data/base.db`, Alembic migrations.
 
-Capabilities and limits of this version: Docker files exist in the working
-tree (`Dockerfile`, `docker-compose.yml`, `.dockerignore`) but are currently
-listed in `.gitignore`, so a clean clone cannot build the image until they are
-added to git; no built-in TLS
+Capabilities and limits of this version: Docker image and compose file
+(`README.md`, Docker setup); no built-in TLS
 termination (use Caddy/Nginx in front for anything beyond loopback), legacy panel has no
 per-form CSRF tokens (SameSite=Lax only), heartbeat presence is spoofable
 within rate limits (devices have no credentials by client design).
@@ -49,8 +47,7 @@ within rate limits (devices have no credentials by client design).
 ## 2. Getting started
 
 Debian/Ubuntu, Python 3.13, no root needed (all default ports > 1024).
-Docker is optional (files exist in the working tree; see `README.md`), but
-they are not currently tracked by git.
+Docker is optional (see `README.md`, Docker setup).
 For an optional React rebuild: Node.js 22 LTS.
 
 From the repository root — separate commands so a failure is easy to locate:
@@ -175,7 +172,9 @@ Repo layout: `app/` (FastAPI: `main.py`, `__main__.py`, `api/`, `core/`,
 
 ## 4. Configuration
 
-Source of truth: `app/core/config.py` + `.env.example`. All settings are
+Source of truth: `app/core/config.py`; the full list is the `README.md`
+"Configuration" table (`.env.example` holds only installation-specific
+settings). All settings are
 environment variables; project-root `.env` is loaded automatically. Never
 commit real values.
 

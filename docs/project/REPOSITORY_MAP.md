@@ -15,7 +15,7 @@
 | `config/` | примеры Caddy и systemd (не production-hardened) |
 | `data/` | runtime: SQLite, `.secrets.env`, pid-файл (не коммитится) |
 | `logs/` | создаётся при старте; приложение само файл лога не пишет |
-| `Dockerfile`, `docker-compose.yml` | сборка/запуск контейнера (**сейчас в `.gitignore`, не в git**) |
+| `Dockerfile`, `docker-compose.yml`, `.dockerignore` | сборка/запуск контейнера (`WORKFLOW.md` §4) |
 | `requirements.txt` | Python-зависимости (без lock-файла) |
 | `requirements-dev.txt` | тестовые зависимости (`pytest`, `httpx`), не в runtime |
 | `tests/` | автотесты; временная SQLite, не `data/` |
@@ -66,7 +66,7 @@
 | `discovery.py` | drain очереди → БД | `reset_online`, `drain_once` (upsert, merge source, stale sweep, лог переполнения очереди) |
 | `discovery_events.py` | потокобезопасная очередь | `publish`, `drain`, `dropped_count`; `MAX_EVENTS=20000` |
 | `audit.py` | append-only журнал, редактирование, retention | `record`, `write_event`, `write_access`, `cleanup_once`, `retention_days`, `serialize`, `diff_fields`, `note_rate_limited` |
-| `connections.py` | события «пользователь → устройство» из запросов шима | `token_index`, `token_digest`, `build_event`, `device_label`, `resolve_by_token`, `resolve_user` |
+| `connections.py` | события «пользователь → устройство»: из запросов шима и из отчётов устройства `/api/audit/*` | `token_index`, `token_digest`, `build_event`, `device_label`, `resolve_by_token`, `resolve_user`, `resolve_reported`, `store_device_report` |
 
 ### `app/core/`
 
@@ -156,12 +156,13 @@
 
 | Файл | Что важно |
 |---|---|
-| `Dockerfile` | multi-stage: Node 22 → Python 3.13; runtime deps без `pip-audit/bandit/grpcio-tools`; non-root UID 1000; `ENTRYPOINT` + `CMD python -m app` |
-| `docker-compose.yml` | ports `8000:8000`, `21116:21116`; volumes `./data`, `./keys:ro`; env-настройки; healthcheck |
+| `Dockerfile` | multi-stage: Node 22 (на платформе сборщика) → Python 3.13; только `requirements.txt`; код root/read-only, процесс UID 1000; контейнерные `HOST`/`PORT`/`SHIM_*`; `HEALTHCHECK`; `ENTRYPOINT docker-entrypoint.sh` + `CMD python -m app` |
+| `.dockerignore` | allow-list контекста сборки: `app/`, `alembic/`, `frontend/` (без `node_modules`/`dist`), `requirements.txt`, entrypoint |
+| `docker-compose.yml` | настройки установки с дефолтами в `environment:` (остальные — дефолты кода) (секреты — `${DEVICE_SECRET:-}`/`${WEB_SECRET:-}` из `.env`); порты 8000, 21116 TCP+UDP; volumes `./data`, `./keys:ro`; `host.docker.internal`; read-only rootfs, `cap_drop: ALL` |
 | `.dockerignore` | исключает `.env`, `data/`, `logs/`, `*.db`, `frontend/dist`, `.venv`, `node_modules` |
 | `config/Caddyfile.example` | диагностический TLS `:8443` + plaintext `:8080`; не production |
 | `config/rustdesk-manager.service` | systemd unit, non-root, `ProtectSystem=strict`, RW только `data/`+`logs/` |
-| `.env.example` | шаблон настроек без секретов |
+| `.env.example` | шаблон настроек установки для нативного запуска, без секретов (полный список — `README.md` «Configuration») |
 
 ## 8. Карта задач → файлы
 

@@ -27,6 +27,7 @@ from app.models.models import AddressBook, Tag, User
 from app.schemas.rustdesk import LoginIn
 from app.services import ab as ab_svc
 from app.services import audit as audit_svc
+from app.services import connections as conn_svc
 from app.services import device_info as info_svc
 from app.services import presence as presence_svc
 from app.services.auth import (
@@ -459,6 +460,39 @@ async def sysinfo(request: Request):
         return _sysinfo_reply("ID_NOT_FOUND")
     await run_in_threadpool(_persist_sysinfo, rid, data, client_ip(request))
     return _sysinfo_reply("SYSINFO_UPDATED")
+
+
+# --- device connection reports (no auth by design, see services/connections) ---
+
+AUDIT_REPORT_MAX_BYTES = 16 * 1024
+
+
+@router.post("/api/audit/{kind}")
+async def audit_report(kind: str, request: Request):
+    """Connection/file/alarm reports the stock client posts from the device
+    that was connected to (`post_conn_audit` and friends).
+
+    The client treats only a 2xx with an EMPTY body as stored; 4xx is final,
+    5xx and 408/429 are retried for up to ~2 minutes with the same nonce.
+    """
+    if kind not in conn_svc.REPORT_KINDS:
+        raise ClientError(404, "not found")
+    raw = await request.body()
+    if len(raw) > AUDIT_REPORT_MAX_BYTES:
+        raise ClientError(413, "too large")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        raise ClientError(400, "bad json") from None
+    if not isinstance(data, dict):
+        raise ClientError(400, "bad json")
+    if not settings.audit_enabled_flag:
+        return ok_empty()  # accepted and dropped: no retries against a disabled log
+    try:
+        await run_in_threadpool(conn_svc.store_device_report, kind, data, client_ip(request))
+    except conn_svc.ReportError as exc:
+        raise ClientError(400, str(exc)) from None
+    return ok_empty()
 
 
 # --- legacy stubs ---

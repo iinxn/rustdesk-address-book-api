@@ -168,36 +168,46 @@ shim host, keep the same Key as for `hbbs`.
 
 ### Docker setup
 
-Needs Docker Engine + Compose plugin on the build/run machine (not on dev box).
-The image builds the React panel itself (multi-stage, no local `dist/` needed)
-and runs as non-root. The database stays on the host, never in the container.
+Needs Docker Engine with the Compose plugin. The image builds the React panel
+itself, runs as non-root UID 1000 with read-only code, and keeps the database
+and generated secrets in the `/app/data` volume.
 
-> **Before you rely on this:** `Dockerfile`, `docker-compose.yml` and
-> `.dockerignore` are currently listed in `.gitignore`, so a fresh clone does
-> not contain them. Add those files to git (and remove the ignore entries) if
-> the Docker path must be reproducible.
+The settings that depend on your installation (secrets, database, sessions,
+proxy, shim, audit) are listed with defaults and comments in
+`docker-compose.yml` (`environment:`). Edit them there, then run
+`docker compose up -d`. Tuning knobs keep their defaults; the full list is
+in [Configuration](#configuration).
 
 ```bash
-mkdir -p data keys && chmod 700 data
-# DEVICE_SECRET + WEB_SECRET можно оставить CHANGEME — entrypoint сгенерирует
-# их при первом старте и сохранит в data/.secrets.env (переиспользуются дальше)
-cp /path/to/hbbs-id_ed25519 keys/ && chmod 600 keys/id_ed25519  # only if SHIM_ENABLED=1
-chown -R $(id -u):$(id -g) data    # image runs as UID 1000
+mkdir -p data keys
+cp /path/to/hbbs-id_ed25519 keys/id_ed25519 && chmod 600 keys/id_ed25519  # only if SHIM_ENABLED=1
 docker compose up -d --build
-docker compose logs -f             # expect "migrations ok", then serving
+docker compose logs -f app           # expect "migrations ok"
 curl http://127.0.0.1:8000/health/ready
+docker compose exec app python -m app.cli create-admin
 ```
 
-Stop keeps data: `docker compose down`. Admin user: `docker compose exec app python -m app.cli create-admin`.
-All knobs (ports, `HOST`, `SESSION_DAYS`, shim, rate limits) are environment
-variables in `docker-compose.yml` with comments — edit the file, then
-`docker compose up -d` again. Details: `Dockerfile`, `docker-compose.yml`.
+- `DEVICE_SECRET`/`WEB_SECRET` come from a `.env` next to the compose file,
+  or are generated on first start and saved in `data/.secrets.env`
+  (mode 600). Keep that file: a new `DEVICE_SECRET` makes stored device
+  passwords unreadable.
+- Ports `8000` (API + panel) and `21116` TCP **and** UDP (shim). Behind a
+  reverse proxy on the same host publish `"127.0.0.1:8000:8000"`.
+- hbbs on the Docker host: `SHIM_UPSTREAM: "host.docker.internal:21166"`.
+- `./data` must be writable by UID 1000, otherwise set `user: "UID:GID"`.
+- Prebuilt image: set `image: <user>/rustdesk-ab-backend:<tag>`, then
+  `docker compose pull && docker compose up -d`.
+
+Stop keeps data: `docker compose down`. Startup sequence, upgrades, moving a
+native install into Docker, publishing to Docker Hub:
+`docs/development/WORKFLOW.md` §4.
 
 ## Configuration
 
 All settings are environment variables (or `.env` file), all optional except
-the two secrets. Defaults in code (`app/core/config.py`); copy of the template
-in `.env.example`.
+the two secrets. Defaults in code (`app/core/config.py`). `.env.example` and
+`docker-compose.yml` list only the installation-specific ones; this table is
+the full list.
 
 | Variable                                     | Required                      | Format                                                             | Used by                                                                       | Example                       |
 | -------------------------------------------- | ----------------------------- | ------------------------------------------------------------------ | ----------------------------------------------------------------------------- | ----------------------------- |
@@ -218,9 +228,29 @@ in `.env.example`.
 | `HEARTBEAT_PER_MINUTE_PER_DEVICE`          | no (`20`)                   | int                                                                | Per-device heartbeat throttle (key: `id` + client IP) → `429`              | —                            |
 | `HEARTBEAT_PER_MINUTE_PER_IP`              | no (`6000`)                 | int                                                                | Aggregate per-IP heartbeat flood cap → `429`                               | —                            |
 | `SYSINFO_PER_MINUTE_PER_IP`                | no (`6000`)                 | int                                                                | Aggregate per-IP sysinfo cap (covers a first-boot burst) → `429`            | —                            |
+| `AUDIT_REPORT_PER_MINUTE_PER_IP` | no (`600`) | int | Per-IP cap for device connection reports `/api/audit/*` → `429` | — |
 | `TRUSTED_PROXIES`                          | no (empty)                  | comma-separated IPs                                                | Trust `X-Forwarded-For` from these peers for rate limits; empty = ignore      | `127.0.0.1`                   |
 | `EXPOSE_DOCS`                              | no (`0`)                    | `0`/`1`                                                          | Serve `/docs`, `/redoc`, `/openapi.json` (auto-on in `DEV_MODE`)              | `0`                           |
 | `LOG_LEVEL`                                | no (`INFO`)                 | logging level                                                      | Uvicorn log level                                                             | `WARNING`                   |
+| `SESSION_COOKIE_SECURE` | no (`auto`) | `auto`/`1`/`0` | Panel cookie `Secure` flag (`auto` = on HTTPS requests) | `1` |
+| `PASSWORD_HASH_WORKERS` / `PASSWORD_HASH_QUEUE` | no (`2`/`8`) | int | bcrypt threads / logins in flight before `429` | — |
+| `SHIM_UDP_MAX_SESSIONS` / `SHIM_UDP_PER_IP_PER_MIN` | no (`2048`/`600`) | int | Shim UDP session caps | — |
+| `SHIM_DIAG_MSGTYPES` | no (`0`) | `0`/`1` | Log decrypted message types + target IDs (never keys/tokens) | `0` |
+| `DISCOVERY_ENABLED` | no (`1`) | `0`/`1` | Devices seen by the shim appear as "discovered" | `1` |
+| `DISCOVERY_ONLINE_SEC` | no (`180`) | int, s | Discovered device counts as offline after this silence | — |
+| `DISCOVERY_NEW_IDS_PER_IP_PER_MIN` | no (`30`) | int | New device IDs accepted per IP per minute | — |
+| `DISCOVERY_CONNECTION_DEDUPE_SEC` | no (`60`) | int, s | One connection-log entry per initiator/target within this window | — |
+| `AUDIT_ENABLED` | no (`1`) | `0`/`1` | Event log (`/audit`) | `1` |
+| `AUDIT_RETENTION_DAYS` | no (`90`) | int, clamped 30..90 | Event log retention | `30` |
+| `AUDIT_CLEANUP_INTERVAL_SEC` / `AUDIT_CLEANUP_INITIAL_DELAY_SEC` | no (`86400`/`60`) | int, s | Retention job schedule | — |
+| `AUDIT_SLOW_REQUEST_MS` | no (`2000`) | int, `0` = off | Slow request warning threshold | — |
+| `AUDIT_READ_DEDUPE_SEC` | no (`300`) | int, s | Repeated reads collapse into one access entry | — |
+| `APP_NAME` | no (`RustDesk API`) | string | FastAPI title | — |
+
+In the Docker image `HOST=0.0.0.0`, `PORT=8000`, `SHIM_LISTEN=0.0.0.0:21116`
+and `SHIM_ID_KEY=/app/keys/id_ed25519` are preset; `docker-compose.yml`
+lists only the settings that depend on the installation. Any other variable
+from this table can be added to its `environment:` block.
 
 API↔shim wiring is exactly three values: `SHIM_LISTEN` (where clients
 connect), `SHIM_UPSTREAM` (where the real hbbs listens), `SHIM_ID_KEY`

@@ -379,6 +379,30 @@ sequenceDiagram
 - Это **запрос** на подключение: установился ли сеанс P2P/relay и сколько
   он длился, проект не видит (`outcome=unknown`). Требует `SHIM_ENABLED=1`.
 
+#### Отчёты устройства (`/api/audit/*`, `observed=device_report`)
+
+Второй, независимый от шима источник (DEC-021). Устройство, **к которому**
+подключились, само шлёт на `api-server` `POST /api/audit/conn` (этапы
+`new` → вход → `close`), `/api/audit/file` и `/api/audit/alarm`
+(API_REFERENCE §2.16).
+
+- `rustdesk.audit_report` читает тело (≤16 KiB) и отдаёт его в threadpool
+  `connections.store_device_report`: проверка `nonce` (повтор клиента),
+  своя сессия, commit, затем `nonce` запоминается.
+- Этап `new` только запоминает IP подключающегося в памяти
+  (`(id устройства, conn_id)`); вход даёт `connection.established`,
+  `close` — `connection.closed` с длительностью. Соединение без входа строки
+  не даёт; неудачные пароли приходят как `security.client_alarm`.
+- Пользователь — `resolve_reported`: вход в API с ID подключающегося
+  (`session`), иначе единственный активный пользователь с таким именем
+  (`reported_name`, клиент шлёт `display_name` из нашего `/api/login`),
+  иначе `book_owner`, иначе устройство.
+- Отчёт не аутентифицирован: это заявление устройства, а не доказательство
+  (SEC-028). Состояние соединений и `nonce` — в памяти, ограничено
+  (`STATE_MAX`) и теряется при рестарте.
+- В отличие от шима, видно **установленный** сеанс и его длительность, а
+  `SHIM_ENABLED` не нужен; нужен заданный `api-server` на устройствах.
+
 ## 8. KX-shim: TCP
 
 ```mermaid
@@ -510,13 +534,14 @@ flowchart LR
 
 ### Docker
 
-`Dockerfile`: stage 1 собирает SPA (`npm ci && npm run build`), stage 2 —
-Python runtime, non-root `appuser` (UID 1000), entrypoint генерирует и
-сохраняет секреты в `/app/data/.secrets.env` (mode 600), затем `python -m app`.
-`docker-compose.yml` публикует `8000` и `21116`, монтирует `./data` и
-read-only `./keys`. По умолчанию API в контейнере на `8000`, а не `21114`;
-для sysinfo с пустым `api-server` нужен явный `api-server` в клиенте или
-публикация `21114 → 8000`.
+`Dockerfile`: stage 1 собирает SPA, stage 2 — Python runtime; код только для
+чтения, процесс — `appuser` (UID 1000), пишет только в `/app/data`.
+Entrypoint генерирует и сохраняет секреты в `/app/data/.secrets.env`
+(mode 600), затем `python -m app`. `docker-compose.yml` публикует `8000` и
+`21116` TCP+UDP, монтирует `./data` и read-only `./keys`. API в контейнере на
+`8000`, а не `21114`; для sysinfo с пустым `api-server` нужен явный
+`api-server` в клиенте или маппинг `"21114:8000"` в compose. Подробно —
+`docs/development/WORKFLOW.md` §4.
 
 ### Reverse proxy
 

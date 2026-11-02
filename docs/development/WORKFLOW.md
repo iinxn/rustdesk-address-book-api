@@ -11,12 +11,8 @@
   системный `python3`.
 - Node.js 22 нужен только для сборки SPA; `frontend/package-lock.json`
   фиксирует npm-дерево.
-- **Тестов нет** (см. `docs/development/TESTING.md`).
-- **Docker-файлы не в git.** `Dockerfile`, `docker-compose.yml` и
-  `.dockerignore` существуют в рабочем каталоге, но перечислены в
-  `.gitignore`. Свежий клон репозитория их не содержит. Если Docker-деплой
-  нужен, эти файлы надо добавить в git (и убрать из `.gitignore`) — иначе
-  `docker compose build` на чистой машине невозможен.
+- Автотесты: `pytest` на временной БД, см. `docs/development/TESTING.md`.
+- Docker-файлы в git, см. §4. Docker на машине разработки не установлен.
 - `data/app.pid` может быть протухшим: `stop.sh` это проверяет, но не
   доверяй файлу вручную.
 
@@ -110,39 +106,140 @@ npm run lint     # oxlint
 
 ## 4. Docker
 
-> Сейчас `Dockerfile`/`docker-compose.yml` не отслеживаются git (см. §1).
-> Команды ниже работают только в каталоге, где эти файлы есть.
+Файлы: `Dockerfile`, `docker-compose.yml`, `.dockerignore`,
+`scripts/docker-entrypoint.sh` — все в git, секретов не содержат. Настройки,
+зависящие от установки (секреты, БД, сессии, прокси, шим, аудит, уровень
+логов), перечислены со значениями по умолчанию и комментариями прямо в
+`docker-compose.yml` (`environment:`); их правят там и применяют
+`docker compose up -d`. Лимиты, ёмкость шима, пул bcrypt и внутренние
+параметры аудита оставлены на дефолтах кода; при необходимости любую
+переменную из таблицы `README.md` «Configuration» можно добавить строкой в
+`environment:`. Контейнерные `HOST`/`PORT`/`SHIM_LISTEN`/`SHIM_ID_KEY` заданы в
+образе и не меняются. Секреты подставляются из `.env` рядом с compose
+(`${DEVICE_SECRET:-}`), а если их нет — генерируются entrypoint'ом.
+
+### 4.1. Образ
+
+- Stage 1 (`node:22-slim`, всегда на платформе сборщика) собирает SPA;
+  stage 2 — `python:3.13-slim`, ставит только `requirements.txt`
+  (dev/audit-инструменты — в `requirements-dev.txt`).
+- `.dockerignore` — allow-list: в контекст сборки попадают только `app/`,
+  `alembic/`, `alembic.ini`, `requirements.txt`, `frontend/` (без
+  `node_modules`/`dist`) и entrypoint. `.env`, `data/`, `keys/`, `*.db`,
+  `.git` в образ и даже в контекст не попадают.
+- Код принадлежит root и только читается; процесс работает как `appuser`
+  UID/GID 1000 и пишет только в `/app/data` (volume). Байткод собран при
+  сборке.
+- В образе заданы контейнерные значения `HOST=0.0.0.0`, `PORT=8000`,
+  `SHIM_LISTEN=0.0.0.0:21116`, `SHIM_ID_KEY=/app/keys/id_ed25519`.
+- `HEALTHCHECK` опрашивает `/health/ready` на `$PORT`.
+- Entrypoint: проверяет, что `/app/data` доступен на запись (иначе понятная
+  ошибка и выход), выставляет `umask 077`, генерирует `DEVICE_SECRET`/
+  `WEB_SECRET`, если они пустые или `CHANGEME*`, и сохраняет их в
+  `/app/data/.secrets.env` (600, атомарная запись). Явно заданные значения
+  всегда выигрывают; значения не печатаются. Если файл секретов записать
+  нельзя — контейнер **не стартует**: временные секреты потеряли бы пароли
+  устройств при следующем рестарте.
+
+### 4.2. Запуск через compose
 
 ```bash
-mkdir -p data keys && chmod 700 data
-# только если SHIM_ENABLED=1:
-cp /path/to/hbbs-id_ed25519 keys/ && chmod 600 keys/id_ed25519
-chown -R $(id -u):$(id -g) data     # образ работает как UID 1000
+mkdir -p data keys
+# только если SHIM_ENABLED=1 (файл обязательно называется id_ed25519):
+cp /path/to/hbbs-id_ed25519 keys/id_ed25519 && chmod 600 keys/id_ed25519
+# правка настроек: docker-compose.yml, раздел environment
 
-docker compose up -d --build
-docker compose logs -f              # ждать "migrations ok"
+docker compose up -d --build    # с Docker Hub: image: <user>/...; docker compose pull
+docker compose logs -f app      # ждать "migrations ok"
 curl -s http://127.0.0.1:8000/health/ready
+docker compose exec app python -m app.cli create-admin
 ```
+
+Что происходит при `docker compose up -d`:
+
+1. Compose читает `docker-compose.yml`; `${DEVICE_SECRET:-}` и
+   `${WEB_SECRET:-}` подставляются из окружения shell или из `.env` в том же
+   каталоге (больше compose из `.env` ничего не берёт).
+2. Если образа `image:` нет локально — собирает его по `build: .`
+   (или берёт с Docker Hub после `docker compose pull`).
+3. Создаёт сеть и контейнер: монтирует `./data` → `/app/data` и
+   `./keys` → `/app/keys:ro`, публикует порты, передаёт `environment:`.
+4. В контейнере стартует `docker-entrypoint.sh`: проверка записи в
+   `/app/data`, секреты (из env → из `data/.secrets.env` → генерация).
+5. `exec python -m app`: проверка конфигурации, `alembic upgrade head`,
+   `migrations ok`, uvicorn на `HOST:PORT`, шим (если `SHIM_ENABLED=1`),
+   фоновые задачи discovery и retention.
+6. Через ~30 с `HEALTHCHECK` начинает опрашивать `/health/ready`;
+   статус виден в `docker compose ps` (`healthy`).
+
+Что ещё задаёт `docker-compose.yml`:
+
+- Порты: `8000:8000` и `21116:21116` **TCP и UDP** (клиент использует оба).
+  За прокси на том же хосте — `"127.0.0.1:8000:8000"`; клиенту с пустым
+  `api-server` нужен `"21114:8000"` (ERR-009). Меняется только сторона хоста.
+- `extra_hosts: host.docker.internal:host-gateway` — для hbbs на том же
+  хосте (`SHIM_UPSTREAM=host.docker.internal:21166`). `127.0.0.1` внутри
+  контейнера — это сам контейнер, а не хост.
+- Hardening: `read_only: true` + `tmpfs /tmp`, `cap_drop: [ALL]`,
+  `no-new-privileges`; ротация json-логов 10 МБ × 5; `stop_grace_period: 30s`.
 
 Особенности:
 
-- Entrypoint генерирует `DEVICE_SECRET`/`WEB_SECRET`, если они пустые или
-  `CHANGEME*`, и сохраняет их в `/app/data/.secrets.env` (mode 600).
-  Явно заданные значения всегда выигрывают. Секреты не печатаются.
-- Публикуются `8000` (API+SPA) и `21116` (шим, TCP/UDP). Порт `21114` **не**
-  публикуется. Если клиент вычисляет API как `rendezvous_port - 2 = 21114`,
-  ему нужен явный `api-server` в настройках или маппинг `21114:8000`.
-- `./data` монтируется в `/app/data`; без volume БД исчезнет вместе с
-  контейнером. Если исторические данные лежат в `pc-service.db`, задай
-  `DATABASE_URL=sqlite:////app/data/pc-service.db`, иначе контейнер создаст
-  пустой `base.db`.
-- `./keys` монтируется read-only; `SHIM_ID_KEY` должен указывать на путь
-  внутри контейнера (`/app/keys/id_ed25519`).
-- Контейнер работает non-root (UID 1000). Если UID хоста другой — задай
-  `user: "UID:GID"` или сделай `chown` на `data/`.
+- Значения в `environment:` — в кавычках; литерал `$` пишется как `$$`.
+  Если секреты вписаны прямо в compose — `chmod 600` и не коммитить.
+- Образ работает как UID 1000. Если `./data` принадлежит другому
+  пользователю — `user: "UID:GID"` в compose или `chown` каталога. Ключ в
+  `keys/` тоже должен читаться этим UID.
+- `DATABASE_URL` с относительным именем (`sqlite:///pc-service.db`)
+  привязывается к `data/` и одинаково работает нативно и в контейнере.
+  Абсолютный путь хоста в контейнере не существует. Пусто — `base.db`.
+- **Не запускай нативный процесс и контейнер на одном `data/` одновременно**:
+  два процесса на одной SQLite-базе и на одних портах.
+- `TRUSTED_PROXIES`: прокси на хосте ходит в опубликованный порт через
+  docker-proxy, и приложение видит адрес шлюза docker-сети (например
+  `172.18.0.1`, см. `docker network inspect`), а не `127.0.0.1`. Внешние
+  клиенты на опубликованных портах приходят со своими адресами.
+- Без compose: `docker run --env-file <файл>` не обрезает комментарии в
+  строке со значением — пиши комментарии отдельной строкой.
+- Логи: `docker compose logs -f app`; файла `logs/app.log` нет.
 - Остановка: `docker compose down` (данные на хосте остаются).
-- Админ: `docker compose exec app python -m app.cli create-admin`.
-- Логи: `docker compose logs -f app`; файла `logs/app.log` внутри нет.
+
+### 4.3. Перенос нативной установки в контейнер
+
+1. Останови нативный процесс (`./scripts/stop.sh`) и сделай
+   `.venv/bin/python -m app.cli backup`.
+2. Секреты: нативный `.env` в каталоге с compose подставит прежние
+   `DEVICE_SECRET`/`WEB_SECRET` автоматически. Другой `DEVICE_SECRET` =
+   нечитаемые пароли устройств.
+3. Перенеси нужные настройки из `.env` в `environment:` compose;
+   `DATABASE_URL` — пусто или относительное имя (см. выше).
+4. `docker compose up -d --build`; убедись, что в панели прежние книги.
+
+### 4.4. Обновление
+
+```bash
+docker compose exec app python -m app.cli backup   # или копия data/ при остановленном контейнере
+docker compose pull   # для готового образа; для локального — up --build
+docker compose up -d
+docker compose logs -f app   # миграции применяются при старте
+```
+
+### 4.5. Публикация на Docker Hub
+
+```bash
+docker login
+docker buildx create --use --name multi   # один раз
+docker buildx build --platform linux/amd64,linux/arm64 \
+  --build-arg VERSION=1.0.0 --build-arg REVISION="$(git rev-parse --short HEAD)" \
+  -t <user>/rustdesk-ab-backend:1.0.0 -t <user>/rustdesk-ab-backend:latest \
+  --push .
+```
+
+Собирай из чистого клона или проверь `git status`: образ берёт файлы из
+рабочего каталога, включая незакоммиченные (ERR-005). На сервере достаточно
+`docker-compose.yml` с `image: <user>/rustdesk-ab-backend:1.0.0` (и при
+желании `.env` с секретами); `build: .` при наличии образа не используется. Проверка содержимого образа:
+`docker run --rm --entrypoint ls <image> /app/alembic/versions`.
 
 ## 5. systemd
 

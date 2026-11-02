@@ -1,0 +1,129 @@
+# RustDesk address-book backend - single-container stack.
+#
+# The settings you may need to adjust are listed below with their defaults.
+# Edit the values right here, then apply them:  docker compose up -d
+#
+# First start:
+#   mkdir -p data keys
+#   docker compose up -d --build        # or `docker compose pull` for a Docker Hub image
+#   docker compose logs -f app          # wait for "migrations ok"
+#   docker compose exec app python -m app.cli create-admin
+#   open http://<server>:8000/app/
+#
+# Notes on values:
+#   * Quote every value ("..."); a literal "$" must be written as "$$".
+#   * The only secrets are DEVICE_SECRET and WEB_SECRET. Leave them empty to
+#     have them generated once and kept in data/.secrets.env, or put them
+#     into a `.env` file next to this one (DEVICE_SECRET=..., WEB_SECRET=...).
+#     If you write them directly into this file, keep it private (chmod 600)
+#     and never commit it.
+
+services:
+  app:
+    # Local build from this repository. To run the published image instead,
+    # replace with e.g. <dockerhub-user>/rustdesk-ab-backend:1.0.0
+    image: rustdesk-ab-backend:local
+    build: .
+    restart: unless-stopped
+
+    ports:
+      # "<host address:>host port:container port". Change only the host side;
+      # the container listens on 8000 and 21116.
+      # API + web panel (plain HTTP). Behind a reverse proxy on this host:
+      # "127.0.0.1:8000:8000". Client with an empty api-server setting looks
+      # for the API on 21114: "21114:8000".
+      - "8000:8000"
+      # KX shim. The RustDesk client uses BOTH TCP and UDP on 21116.
+      - "21116:21116/tcp"
+      - "21116:21116/udp"
+
+    volumes:
+      # THE database, generated secrets and backups. Back it up, never delete.
+      # Must be writable by UID 1000 (see `user:` below).
+      - ./data:/app/data
+      # hbbs private key (file name id_ed25519), read-only. Shim only.
+      - ./keys:/app/keys:ro
+
+    environment:
+      # Only settings that depend on your installation are listed here.
+      # Everything else (rate limits, shim capacity, bcrypt pool, audit
+      # internals, container addresses) has tuned defaults in the image and
+      # normally stays untouched. To override one anyway, add a line with its
+      # name: README.md, "Configuration".
+
+      # ---------------------------------------------------------- secrets --
+      # Fernet key for stored device passwords. Changing it later makes the
+      # stored passwords unreadable. Generate: docker compose run --rm app python -m app.cli gen-key
+      DEVICE_SECRET: "${DEVICE_SECRET:-}"
+      # Signs the legacy panel cookie; 32+ random chars (openssl rand -hex 32).
+      WEB_SECRET: "${WEB_SECRET:-}"
+
+      # --------------------------------------------------------- database --
+      # Empty = data/base.db. A relative name such as "sqlite:///pc-service.db"
+      # is placed in data/. Postgres: "postgresql+psycopg://user:pass@host:5432/db".
+      DATABASE_URL: ""
+
+      # ---------------------------------------------------------- sessions --
+      # Days until an API/panel login expires (0 = never, not recommended).
+      SESSION_DAYS: "30"
+      # Panel cookie Secure flag: "auto" (on for HTTPS requests), "1", "0".
+      SESSION_COOKIE_SECURE: "auto"
+      # Devices per address book (0 = unlimited).
+      MAX_PEER_ONE_AB: "0"
+
+      # ------------------------------------------------------ reverse proxy --
+      # Comma-separated reverse-proxy IPs whose X-Forwarded-For is trusted.
+      # A proxy on the Docker host is seen as the Docker network gateway
+      # (e.g. 172.18.0.1, see `docker network inspect`), not 127.0.0.1.
+      TRUSTED_PROXIES: ""
+
+      # ------------------------------------------------------------- shim --
+      # "1" = terminate KeyExchange for logged-in clients on 21116.
+      # Needs ./keys/id_ed25519 (the hbbs PRIVATE key, not the .pub).
+      SHIM_ENABLED: "0"
+      # The real hbbs rendezvous port, never the relay 21117.
+      # hbbs on this Docker host started with `-p 21166`: host.docker.internal:21166
+      # hbbs on another machine: "<hbbs-host>:21116"
+      SHIM_UPSTREAM: "host.docker.internal:21116"
+      # Devices seen by the shim appear in the panel as "discovered".
+      DISCOVERY_ENABLED: "1"
+
+      # ------------------------------------------------------------ audit --
+      # "0" disables the event log (/audit in the panel).
+      AUDIT_ENABLED: "1"
+      # Days to keep events; clamped to 30..90.
+      AUDIT_RETENTION_DAYS: "90"
+
+      # ---------------------------------------------------------- logging --
+      # DEBUG | INFO | WARNING | ERROR
+      LOG_LEVEL: "INFO"
+
+      # --------------------------------------------------------- API docs --
+      # "1" = serve /docs, /redoc and /openapi.json (full API inventory).
+      # Keep "0" in production (SEC-008).
+      EXPOSE_DOCS: "0"
+
+    # Makes host.docker.internal point at the Docker host (for SHIM_UPSTREAM).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    # The image runs as UID/GID 1000. If ./data belongs to another user,
+    # put that user here, e.g. "1001:1001" (see `id -u`, `id -g`).
+    # user: "1000:1000"
+
+    # Hardening: no root capabilities; only the data volume and /tmp are
+    # writable.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
+    # Time for the shim and the audit shutdown event to finish.
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

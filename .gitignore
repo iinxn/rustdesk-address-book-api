@@ -13,12 +13,11 @@ certs/
 *.key
 *.pub
 id_ed25519*
-.dockerignore
-docker-compose.yml
-Dockerfile
 .secrets.env
 rustdesk.json
 SECURITY_AUDIT.md
 
 # Local AI-agent skills (OpenCode); not published
 .opencode/
+.mypy_cache/
+.ruff_cache/

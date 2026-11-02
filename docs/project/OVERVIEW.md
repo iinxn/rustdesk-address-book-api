@@ -124,8 +124,9 @@ rendezvous на том же порту проксируется отдельно
 - discovery через shim, сохранение истории, stale-sweep;
 - KX-shim TCP (secure + plain) и UDP relay, лимиты, супервизор;
 - SPA и legacy-панель;
-- Docker-образ с non-root, автосекретами и healthcheck (**Docker-файлы
-  сейчас не в git** — см. `docs/development/WORKFLOW.md` §1);
+- Docker-образ (non-root, read-only код, автосекреты, healthcheck, amd64/arm64)
+  и compose — `docs/development/WORKFLOW.md` §4; сборка образа на этой машине
+  не проверялась (Docker не установлен);
 - CLI backup/restore-совместимый (`backup` создаёт копию с `integrity_check`).
 
 ## 6. Что ограничено или не реализовано

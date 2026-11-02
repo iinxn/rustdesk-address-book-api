@@ -231,6 +231,7 @@ def rate_limit_rules() -> list[tuple[str, tuple[str, ...], str]]:
         ("/api/login", ("POST",), "login_per_minute_per_ip"),
         ("/panel/login", ("POST",), "login_per_minute_per_ip"),
         ("/api/sysinfo", ("POST",), "sysinfo_per_minute_per_ip"),
+        ("/api/audit/", ("POST",), "audit_report_per_minute_per_ip"),
     ]
 
 
@@ -348,8 +349,9 @@ class PanelSessionMiddleware:
 # High-volume or explicitly instrumented endpoints. Heartbeats and sysinfo are
 # deliberately absent: they run every ~15 s per device and already have their
 # own state-transition events. The audit reader itself is skipped so browsing
-# the log cannot grow the log.
-_SKIP_AUDIT_PREFIXES = ("/api/heartbeat", "/api/sysinfo", "/api/v1/audit")
+# the log cannot grow the log. Device connection reports (/api/audit/*) write
+# their own explicit events.
+_SKIP_AUDIT_PREFIXES = ("/api/heartbeat", "/api/sysinfo", "/api/v1/audit", "/api/audit/")
 _SKIP_AUDIT_EXACT = {"/api/login-options"}
 # POST endpoints that only read. They are access-logged only when they target a
 # path parameter (e.g. tags of one book) or fail.

@@ -77,6 +77,9 @@ class Settings(BaseSettings):
     # services/device_info.save_sysinfo), so this cap only has to absorb that
     # bootstrap burst while remaining a finite flood guard.
     sysinfo_per_minute_per_ip: int = 6000
+    # /api/audit/{conn,file,alarm}: unauthenticated connection reports of
+    # controlled devices, ~3 per remote session. Finite flood guard per IP.
+    audit_report_per_minute_per_ip: int = 600
     # Shim discovery registry (shim -> SQLite). On by default. The shim still
     # applies its own per-IP limits before publishing anything.
     discovery_enabled: str = "1"

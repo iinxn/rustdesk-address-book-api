@@ -1,0 +1,19 @@
+# Allow-list: the build context contains only what the Dockerfile copies.
+# Everything else (.env, data/, keys/, *.db, logs, .git, local dumps, caches)
+# never reaches the Docker daemon, so it cannot leak into an image layer.
+*
+
+!Dockerfile
+!requirements.txt
+!alembic.ini
+!alembic/
+!app/
+!scripts/docker-entrypoint.sh
+!frontend/
+
+# Re-excluded inside the allowed directories.
+frontend/node_modules/
+frontend/dist/
+**/__pycache__/
+**/*.py[co]
+**/.DS_Store

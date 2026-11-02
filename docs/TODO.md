@@ -11,14 +11,13 @@
 
 ## 0. Текущее состояние (handoff)
 
-**Дата:** 2026-10-31. **Последний коммит:** `ccb87c6` (исправления аудита
-безопасности). Рабочее дерево содержит **незакоммиченный рефакторинг
-2026-10-31** (DEC-020): `app/api/v1/*` вместо `webapi.py`, единая проверка
-доступа `ab.book_access`, чистые ASGI-middleware, групповой commit heartbeat,
-WAL, разбиение `Devices.tsx`; `pytest -q` — 99 passed, 2 skipped; frontend
-`build`/`lint` проходят (Node 22 из временного каталога). Исправлены
-найденные по ходу SEC-026/027, ERR-016, SEC-004, SEC-013, часть SEC-006.
-Что осталось — `TODO-017`.
+**Дата:** 2026-11-01. **Последний коммит:** `f4d7b14` (рефакторинг
+2026-10-31, DEC-020: `app/api/v1/*`, единая проверка доступа, ASGI-middleware,
+групповой commit heartbeat, WAL; остаток — `TODO-017`). Рабочее дерево:
+**незакоммиченная переделка Docker** (`TODO-002`): Docker-файлы в git,
+compose без секретов, allow-list `.dockerignore`, TCP+UDP `21116`,
+dev-инструменты перенесены в `requirements-dev.txt`. Образ не собирался —
+Docker на машине разработки нет.
 
 - Приложение не запущено. `data/app.pid` содержит **протухший** PID
   (процесс не существует) — это ожидаемое последствие ручной остановки, а не
@@ -99,6 +98,14 @@ WAL, разбиение `Devices.tsx`; `pytest -q` — 99 passed, 2 skipped; fro
     «Неопознанный клиент»; в логах шима нет токена.
 - **Ограничения:** запрос на подключение ≠ установленный сеанс
   (`outcome=unknown`); при `other_server` клиент шлёт пустой токен.
+- **Сделано (2026-11-01, DEC-021):** второй источник без шима — отчёты
+  устройства `POST /api/audit/{conn,file,alarm}` (раньше `404`, ERR-018):
+  `connection.established`/`closed` с длительностью, передача файлов,
+  тревоги; SPA показывает их с оговоркой «сообщило устройство»;
+  `tests/test_device_reports.py` (12 тестов). **Требует проверки на живом
+  клиенте:** приходят ли поля `peer`/`type`/`nonce` в используемой версии,
+  определяется ли пользователь (`session` или `reported_name`), строка
+  «отключился» с длительностью.
 - **Связанные документы:** `ARCHITECTURE.md` §7.3, `API_REFERENCE.md`
   (audit), `DATA_MODEL.md` (`sessions.device_id`), `SECURITY.md` §8.
 
@@ -157,76 +164,28 @@ WAL, разбиение `Devices.tsx`; `pytest -q` — 99 passed, 2 skipped; fro
 - **Не проверено:** SEC-023 на живом парке и с реальным hbbs; `Secure`
   за реальным TLS-прокси.
 
-### TODO-001. Привести права файлов секретов к `600` (SEC-002)
-
-- [ ] **Приоритет:** высокий.
-
-- **Компонент:** `data/`, `.env`, эксплуатация.
-- **Критерии готовности:** на проверенной машине `.env`,
-  `data/.secrets.env` и `data/pc-service.db` имеют режим `600`; `data/` —
-  `700`; владелец — пользователь, от которого работает сервис (для
-  нативного запуска допустим текущий); приложение стартует,
-  `/health/ready` отвечает; содержимое файлов не печаталось и не менялось.
-- **Зависимости и ограничения:** `data/base.db` уже `600`, менять только
-  режимы, не содержимое. Не коммить `.env`/`.secrets.env`.
-- **Связанные документы:** `docs/SECURITY.md` §6 и SEC-002,
-  `docs/development/WORKFLOW.md` §5.
-
 ### TODO-002. Вернуть Docker-файлы в git
 
-- [ ] **Приоритет:** высокий.
+- [ ] **Приоритет:** высокий. **Частично (2026-11-01):** файлы переписаны и
+  убраны из `.gitignore` (см. `docs/development/WORKFLOW.md` §4).
+  Проверено без Docker: entrypoint (генерация, переиспользование, явные
+  значения, ошибка записи, `umask`) в песочнице; запуск приложения из дерева,
+  совпадающего с allow-list `.dockerignore`, в чистом venv только с
+  `requirements.txt`, с кодом только для чтения: миграции `0001–0006`,
+  `/health/ready`, `/app/`, `/panel/login`, healthcheck-команда, CLI.
+  **Не проверено:** `docker build`/`docker compose up` (Docker на машине
+  разработки не установлен), multi-arch-сборка, публикация на Docker Hub,
+  shim в контейнере с реальным hbbs.
 
 - **Компонент:** корень репозитория, Docker, деплой.
-- **Критерии готовности:** `Dockerfile`, `docker-compose.yml` и
-  `.dockerignore` убраны из `.gitignore` и отслеживаются git; чистая копия
-  репозитория собирается (`docker compose build`); в образе есть все
-  миграции `0001–0006`; контейнер стартует и `/health/ready` отвечает.
-- **Зависимости и ограничения:** нужно решение владельца поддерживать
-  Docker-путь; сборка требует сети для Node/Python-зависимостей. Секреты и
-  `.env` в git не попадают. Если Docker не поддерживается — удалить раздел
-  Docker из публичной документации, а не оставлять неработающие команды.
+- **Критерии готовности:** чистая копия репозитория собирается
+  (`docker compose build`); `docker run --rm --entrypoint ls <image> /app/alembic/versions` показывает `0001–0006`; контейнер стартует,
+  `/health/ready` отвечает, панель открывается; с `SHIM_ENABLED=1` шим
+  проходит TCP и UDP.
+- **Зависимости и ограничения:** сборка требует сети для Node/Python-
+  зависимостей. Секреты и `.env` в git не попадают.
 - **Связанные документы:** `docs/development/WORKFLOW.md` §1 и §4,
   `docs/project/DATA_MODEL.md` §6, `docs/knowledge/ERRORS.md` ERR-005.
-
-### TODO-003. Вернуть минимальный набор автотестов
-
-- [ ] **Приоритет:** высокий.
-
-- **Компонент:** `tests/`, тестовые зависимости, CI (если появится).
-- **Сделано частично:** `requirements-dev.txt`, `pytest.ini`,
-  `tests/test_heartbeat_rate_limit.py` (heartbeat, 800 устройств,
-  параллельный всплеск, 429/`Retry-After`, chunked, лимиты login),
-  `tests/test_sysinfo_upload.py` (write-once, разрешение из панели,
-  неизвестные ID, 800 устройств на первом старте и повторно),
-  `tests/test_users_display_name.py` (display name) и
-  `tests/test_audit.py` (access/auth/business-события, секреты, 429,
-  фильтры, admin-only, retention, миграция `0004→head`, конкурентные
-  записи), `tests/test_connections.py` (журнал подключений),
-  `tests/test_security_fixes.py` (аудит 2026-10-31),
-  `tests/test_api_contracts.py` (формы ответов `/api/*` и `/api/v1/*`,
-  login/logout, IDOR книг с `rule` 1/2/нет доступа, bulk-частичный успех,
-  валидация ID, legacy-панель), `tests/test_refactor_regressions.py`.
-- **Критерии готовности (остаток):** миграции upgrade/downgrade на копии
-  реальной БД в автотестах (сейчас вручную), CI; `pytest` зелёный; тесты не
-  печатают секреты.
-- **Зависимости и ограничения:** тесты используют временную БД и не должны
-  опираться на `.pytest_cache/`. Не запускать реальный shim на `21116` и не
-  требовать живой `hbbs` для обычных тестов.
-- **Связанные документы:** `docs/development/TESTING.md` §1 и §8,
-  `AGENTS.md` §6.
-
-### TODO-004. Добавить security headers
-
-- [ ] **Приоритет:** средний (высокий перед публичным доступом).
-
-- **Компонент:** FastAPI middleware, reverse proxy.
-- **Критерии готовности:** отдаются `Content-Security-Policy` (совместимый
-  с SPA), `X-Content-Type-Options`, `X-Frame-Options`/`frame-ancestors`,
-  `Referrer-Policy`; HSTS включается только за HTTPS; SPA и legacy-панель
-  не ломаются; заголовки проверены `curl -I`.
-- **Зависимости и ограничения:** CSP для React/Vite требует проверки
-  реальных источников; HSTS нельзя включать на HTTP. Не добавлять CORS.
-- **Связанные документы:** `docs/SECURITY.md` §9.
 
 ### TODO-005. Закрыть SEC-006: `pageSize` и лимит книги
 
@@ -250,7 +209,7 @@ WAL, разбиение `Devices.tsx`; `pytest -q` — 99 passed, 2 skipped; fro
 
 ### TODO-006. Валидировать цвет тега (SEC-004)
 
-- [x] **Выполнено 2026-10-31** (рефакторинг): `ab.parse_color` (uint32),
+- [X] **Выполнено 2026-10-31** (рефакторинг): `ab.parse_color` (uint32),
   `/api/ab/tag/*` → `400 {"error":"invalid color"}`, `/api/v1` — `422`,
   панель сохраняет прежний цвет; `tests/test_refactor_regressions.py`.
 
@@ -265,7 +224,7 @@ WAL, разбиение `Devices.tsx`; `pytest -q` — 99 passed, 2 skipped; fro
 
 ### TODO-007. Ограничить тело запроса без `Content-Length` (SEC-013)
 
-- [x] **Выполнено 2026-10-31** (рефакторинг): `BodyCapMiddleware`
+- [X] **Выполнено 2026-10-31** (рефакторинг): `BodyCapMiddleware`
   буферизует chunked-тело не более `MAX_BODY_BYTES`, сверх — `413` до
   приложения; `tests/test_refactor_regressions.py`, ручная проверка
   `curl` с chunked-телом на временном сервере.
@@ -340,22 +299,7 @@ WAL, разбиение `Devices.tsx`; `pytest -q` — 99 passed, 2 skipped; fro
 - **Зависимости и ограничения:** сейчас запрещены действия только с самим
   собой; не менять это правило, а добавить проверку количества активных
   админов.
-- **Связанные документы:** `docs/SECURITY.md` §5.
-
-### TODO-012. Убрать plaintext-блок из `config/Caddyfile.example`
-
-- [ ] **Приоритет:** низкий/средний (перед копированием в production).
-
-- **Компонент:** `config/Caddyfile.example`.
-- **Критерии готовности:** пример не содержит одновременного HTTPS и
-  plaintext `:8080` на тот же backend; остаётся рабочий TLS-пример;
-  комментарий предупреждает не публиковать HTTP.
-- **Зависимости и ограничения:** файл — пример, но копипаст опасен
-  (SEC-009); не менять фактические конфиги владельца.
-- **Связанные документы:** `docs/SECURITY.md` SEC-009,
-  `docs/development/WORKFLOW.md` §6.
-
-### TODO-013. Полная сверка публичной документации с кодом
+- **Связанные документы:** `docs/SECURITY.md` §5.TODO-013. Полная сверка публичной документации с кодом
 
 - [ ] **Приоритет:** низкий.
 
@@ -371,8 +315,9 @@ WAL, разбиение `Devices.tsx`; `pytest -q` — 99 passed, 2 skipped; fro
 
 ### TODO-014. NAT-сценарий для login и sysinfo
 
-- [x] **Приоритет:** средний (высокий, если >20 устройств реально логинятся
+- [X] **Приоритет:** средний (высокий, если >20 устройств реально логинятся
   с одного IP одновременно).
+
 - **Компонент:** `app/core/middleware.py`, `app/core/config.py`, `app/services/device_info.py`, эксплуатация.
 - **Результат:**
   - login: владелец подтвердил, что одновременно логинятся не более ~10
@@ -417,8 +362,8 @@ WAL, разбиение `Devices.tsx`; `pytest -q` — 99 passed, 2 skipped; fro
 - **Frontend собирается, но Node в системе не установлен.** `npm run build`
   и `npm run lint` проверены 2026-10-31 с временным Node.js 22; `frontend/dist` gitignored, поэтому деплой обязан собирать SPA
   (`Dockerfile`) и не может полагаться на артефакт из репозитория.
-- **Docker-путь не воспроизводим с чистого клона**, пока не выполнен
-  `TODO-002`.
+- **Docker-образ ни разу не собирался после переделки 2026-11-01**: Docker
+  на машине разработки нет (`TODO-002`).
 - **Права `address_book_permissions` управляются вне UI** до `TODO-009`.
 
 ## 4. Ошибки
@@ -426,13 +371,13 @@ WAL, разбиение `Devices.tsx`; `pytest -q` — 99 passed, 2 skipped; fro
 Подтверждённые неисправности, которые ещё не устранены. Формат записи и
 диагностика — `docs/knowledge/ERRORS.md`.
 
-| ID | Статус | Суть | Задача |
-|---|---|---|---|
-| SEC-002 | открыто | `.env`, `data/.secrets.env`, `data/pc-service.db` имеют `664` вместо `600` | TODO-001 |
-| SEC-006 | частично | `/api/ab/peers` без капа `pageSize` (N+1 и лимит книги исправлены 2026-10-31) | TODO-005 |
-| SEC-009 | открыто | `Caddyfile.example` содержит plaintext `:8080` рядом с HTTPS | TODO-012 |
-| SEC-019 | частично | expired-сессии чистятся при login/use, фоновой очистки нет; бессрочные не удаляются | TODO-010 |
-| SEC-020 | открыто | `data/app.pid` предсказуем, TOCTOU в `stop.sh`; влияние ограничено локальным пользователем | отдельная задача не заведена: низкий риск |
+| ID      | Статус     | Суть                                                                                                                                          | Задача                                                                 |
+| ------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| SEC-002 | открыто   | `.env`, `data/.secrets.env`, `data/pc-service.db` имеют `664` вместо `600`                                                   | TODO-001                                                                     |
+| SEC-006 | частично | `/api/ab/peers` без капа `pageSize` (N+1 и лимит книги исправлены 2026-10-31)                                     | TODO-005                                                                     |
+| SEC-009 | открыто   | `Caddyfile.example` содержит plaintext `:8080` рядом с HTTPS                                                                    | TODO-012                                                                     |
+| SEC-019 | частично | expired-сессии чистятся при login/use, фоновой очистки нет; бессрочные не удаляются        | TODO-010                                                                     |
+| SEC-020 | открыто   | `data/app.pid` предсказуем, TOCTOU в `stop.sh`; влияние ограничено локальным пользователем | отдельная задача не заведена: низкий риск |
 
 Исторические инциденты, которые **уже исправлены** (stale discovery,
 naive UTC в UI, `stop.sh`, `Gate.sweep`, `_tasks`), описаны в
@@ -453,6 +398,7 @@ naive UTC в UI, `stop.sh`, `Gate.sweep`, `_tasks`), описаны в
   - **Связанные документы:** `docs/SECURITY.md` §15,
     `docs/development/TESTING.md`.
 - [ ] **Живой прогон heartbeat и sysinfo на ~800 устройствах.**
+
   - **Приоритет:** высокий. **Компонент:** FastAPI, SQLite, реальный парк.
   - **Критерии готовности:** в течение хотя бы нескольких минут нет массовых
     `429` при штатной частоте; `last_seen`/presence обновляются у устройств
@@ -481,8 +427,8 @@ naive UTC в UI, `stop.sh`, `Gate.sweep`, `_tasks`), описаны в
   - **Приоритет:** высокий. **Компонент:** Docker/деплой.
   - **Критерии готовности:** чистая копия репозитория содержит Docker-файлы
     и все миграции, `docker compose build` и запуск проходят.
-  - **Препятствие:** зависит от `TODO-002` (файлы сейчас в `.gitignore`);
-    до этого проверка невозможна по определению.
+  - **Препятствие:** Docker-файлы в git с 2026-11-01, но сборка не
+    проверялась — на машине разработки нет Docker (`TODO-002`).
   - **Связанные документы:** `docs/development/WORKFLOW.md` §1/§4,
     `docs/knowledge/ERRORS.md` ERR-005.
 
@@ -491,7 +437,7 @@ naive UTC в UI, `stop.sh`, `Gate.sweep`, `_tasks`), описаны в
 Короткая история, полезная для понимания текущего состояния. Не добавляй
 сюда каждое изменение.
 
-- [x] **Audit-журнал и технические логи** (2026-10-29):
+- [X] **Audit-журнал и технические логи** (2026-10-29):
   - `audit_events` (миграция `0005`, аддитивно) + `AuditEvent`;
   - `app/services/audit.py` — `record` в транзакции изменения,
     `write_event`/`write_events` best-effort, редактирование `details`,
@@ -512,7 +458,7 @@ naive UTC в UI, `stop.sh`, `Gate.sweep`, `_tasks`), описаны в
     Docker/PostgreSQL, реальный парк устройств.
   - См. `docs/knowledge/DECISIONS.md` DEC-017, `DATA_MODEL.md` §3.10,
     `API_REFERENCE.md` §3.15, `TESTING.md` §1/§4.8.
-- [x] **UI SPA: уведомления, светлая тема, RU/EN** (2026-10-28):
+- [X] **UI SPA: уведомления, светлая тема, RU/EN** (2026-10-28):
   - `frontend/src/notifications.tsx` — один `NotificationProvider` на всё
     приложение, `useNotify()`, тост сверху по центру (`fixed`, `z-[100]`,
     `pointer-events-none`), появление/исчезновение через CSS-анимации,
@@ -530,24 +476,24 @@ naive UTC в UI, `stop.sh`, `Gate.sweep`, `_tasks`), описаны в
   - Не проверено: живой браузерный прогон (в окружении нет Playwright);
     логика подтверждена сборкой/типами и ручной сверкой кода.
   - См. `docs/knowledge/DECISIONS.md` DEC-016, `docs/development/TESTING.md`.
-- [x] **KX-shim и супервизор.** Server-first `KeyExchange` для залогиненных
+- [X] **KX-shim и супервизор.** Server-first `KeyExchange` для залогиненных
   клиентов, plain passthrough, UDP-forwarder, лимиты, backoff, health.
-- [x] **Discovery, sysinfo, bulk-операции и карточка устройства** (коммит
+- [X] **Discovery, sysinfo, bulk-операции и карточка устройства** (коммит
   `822c5a6`): `/api/v1/discovered`, `/api/v1/device-info`, refresh sysinfo,
   массовые теги/удаление, вкладки SPA.
-- [x] **Security-фиксы SEC-001, 003, 007, 008, 010, 011, 014, 015**:
+- [X] **Security-фиксы SEC-001, 003, 007, 008, 010, 011, 014, 015**:
   disable в legacy, trusted proxies, отзыв сессий, скрытые docs,
   `stop.sh`, sweep, очистка задач.
-- [x] **Удаление customers** (миграция `0003`): модель, API, UI, шаблоны,
+- [X] **Удаление customers** (миграция `0003`): модель, API, UI, шаблоны,
   документация; данные устройств/тегов не затронуты.
-- [x] **Heartbeat 429 при ~800 устройствах** (коммит `2220b71`): per-device
+- [X] **Heartbeat 429 при ~800 устройствах** (коммит `2220b71`): per-device
   лимит `(id, IP)` + агрегатный per-IP cap, `Retry-After`, SQLite в
   threadpool; `tests/test_heartbeat_rate_limit.py` покрывает 800 устройств,
   параллельный всплеск, реальное превышение и сохранение лимитов login.
   Синтетика: 3200 последовательных heartbeat за 25 с и 800 параллельных за
   ~4.6 с без 429; живой парк не проверялся.
   См. `docs/knowledge/ERRORS.md` ERR-014 и `DECISIONS.md` DEC-013.
-- [x] **Sysinfo 429 и перезапись при старте парка** (коммит `2220b71`):
+- [X] **Sysinfo 429 и перезапись при старте парка** (коммит `2220b71`):
   `/api/sysinfo` стал write-once, перезапись только по кнопке «Refresh
   info» (одноразовое разрешение 120 с), строки создаются только для
   известных панели ID, лимит 6000/мин на IP, запись в threadpool.
@@ -555,7 +501,7 @@ naive UTC в UI, `stop.sh`, `Gate.sweep`, `_tasks`), описаны в
   800 повторных upload-ов без записи, разрешение из панели, неизвестные ID
   и конечность лимита. См. `docs/knowledge/ERRORS.md` ERR-015 и
   `DECISIONS.md` DEC-014.
-- [x] **Проверка frontend `npm run build` / `npm run lint`** (2026-10-28):
+- [X] **Проверка frontend `npm run build` / `npm run lint`** (2026-10-28):
   Node.js 22.23.4 взят во временный каталог `/tmp` (в системе `node`/`npm`
   нет), `npm ci` переустановил `frontend/node_modules` (прежний каталог был
   неполным: `.bin` содержал копии скриптов вместо симлинков),
@@ -565,10 +511,9 @@ naive UTC в UI, `stop.sh`, `Gate.sweep`, `_tasks`), описаны в
   приложение отдаёт новый бандл.
   - **Не проверено:** ручная сверка `api.ts`/`types.ts` с фактическими
     ответами backend (проверен только `tsc`).
-- [x] **Display name пользователя** (2026-10-28): `users.display_name` был
+- [X] **Display name пользователя** (2026-10-28): `users.display_name` был
   мёртвым полем — читался в `/api/login`, но нигде не записывался. Теперь:
-  `create_user(..., display_name=)`, `display_name` в `POST/PUT
-  /api/v1/users`, self-service `GET/PUT /api/v1/me`, диалог профиля в шапке
+  `create_user(..., display_name=)`, `display_name` в `POST/PUT /api/v1/users`, self-service `GET/PUT /api/v1/me`, диалог профиля в шапке
   SPA, поле в «Users», флаг `create-admin --display-name`. Значение
   нормализуется (trim + схлопывание пробелов, ≤128) и уходит клиенту как
   `LoginRequest.my_name`. `tests/test_users_display_name.py` — 7 тестов.
@@ -578,7 +523,7 @@ naive UTC в UI, `stop.sh`, `Gate.sweep`, `_tasks`), описаны в
   - Смена пароля перенесена из отдельной кнопки «Пароль» в форму
     редактирования пользователя; пустое поле означает «не менять»
     (`PUT /api/v1/users/{id}` уже принимал необязательный `password`).
-- [x] **Система знаний для агентов** (коммит `33e4682`): `AGENTS.md`,
+- [X] **Система знаний для агентов** (коммит `33e4682`): `AGENTS.md`,
   `docs/project/*`, `docs/development/*`, `docs/SECURITY.md`,
   `docs/knowledge/*`, Skills `project-debugging` и `sqlite-changes`;
   исправлены подтверждённые противоречия в `README.md`, `docs/en.md`,

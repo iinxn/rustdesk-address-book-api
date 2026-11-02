@@ -204,10 +204,42 @@ export default function Audit() {
     const value = detail(e, 'conn_type');
     return value ? optLabel(`audit.connection.type.${value}`, value) : '';
   };
-  const connSummary = (e: AuditEvent) =>
-    connUserKnown(e)
-      ? t('audit.connection.summary', { user: e.actor_name || e.actor_id, device: connTo(e) })
-      : t('audit.connection.summaryUnknown', { device: connTo(e) });
+  // Device reports (/api/audit/conn|file) vs. rendezvous requests seen by the shim.
+  const isReport = (e: AuditEvent) => detail(e, 'observed') === 'device_report';
+  const SUMMARY_KIND: Record<string, 'established' | 'closed' | 'file'> = {
+    'connection.established': 'established',
+    'connection.closed': 'closed',
+    'connection.file_transfer': 'file',
+  };
+  const connSummary = (e: AuditEvent) => {
+    const kind = SUMMARY_KIND[e.event_type];
+    const vars = { user: e.actor_name || e.actor_id, device: connTo(e) };
+    if (!kind) {
+      return connUserKnown(e)
+        ? t('audit.connection.summary', vars)
+        : t('audit.connection.summaryUnknown', vars);
+    }
+    return connUserKnown(e)
+      ? t(`audit.connection.summary.${kind}`, vars)
+      : t(`audit.connection.summaryUnknown.${kind}`, vars);
+  };
+  const durationText = (e: AuditEvent) => {
+    const value = e.details?.duration_sec;
+    if (typeof value !== 'number') return '';
+    const h = Math.floor(value / 3600);
+    const m = Math.floor((value % 3600) / 60);
+    const s = value % 60;
+    return h ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`;
+  };
+  const filesText = (e: AuditEvent) => {
+    const files = e.details?.files;
+    if (!Array.isArray(files) || !files.length) return '';
+    const total = e.details?.file_count;
+    const names = files.filter((f): f is string => typeof f === 'string').join(', ');
+    return typeof total === 'number' && total > files.length
+      ? `${names} (${t('audit.connection.fileCount', { shown: files.length, total })})`
+      : names;
+  };
 
   const actorText = (e: AuditEvent) => {
     if (isConnection(e) && !connUserKnown(e)) {
@@ -488,12 +520,38 @@ export default function Audit() {
                 <Field label={t('audit.connection.from')} value={connFrom(selected)} mono />
                 <Field label={t('audit.connection.to')} value={connTo(selected)} mono />
                 <Field label={t('audit.connection.connType')} value={connType(selected)} />
-                <Field
-                  label={t('audit.connection.via')}
-                  value={optLabel(`audit.connection.${detail(selected, 'via')}`, detail(selected, 'via'))}
-                />
+                {isReport(selected) ? (
+                  <>
+                    {detail(selected, 'auth') && (
+                      <Field
+                        label={t('audit.connection.auth')}
+                        value={optLabel(`audit.connection.auth.${detail(selected, 'auth')}`, detail(selected, 'auth'))}
+                      />
+                    )}
+                    {durationText(selected) && (
+                      <Field label={t('audit.connection.duration')} value={durationText(selected)} />
+                    )}
+                    {detail(selected, 'direction') && (
+                      <Field
+                        label={t('audit.connection.direction')}
+                        value={optLabel(
+                          `audit.connection.direction.${detail(selected, 'direction')}`,
+                          detail(selected, 'direction'),
+                        )}
+                      />
+                    )}
+                    {filesText(selected) && <Field label={t('audit.connection.files')} value={filesText(selected)} />}
+                  </>
+                ) : (
+                  <Field
+                    label={t('audit.connection.via')}
+                    value={optLabel(`audit.connection.${detail(selected, 'via')}`, detail(selected, 'via'))}
+                  />
+                )}
               </dl>
-              <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">{t('audit.connection.hint')}</p>
+              <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
+                {t(isReport(selected) ? 'audit.connection.reportHint' : 'audit.connection.hint')}
+              </p>
             </div>
           )}
           <dl className="grid gap-3 sm:grid-cols-2">

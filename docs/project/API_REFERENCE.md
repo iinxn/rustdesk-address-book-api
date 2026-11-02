@@ -10,7 +10,7 @@
 
 | Префикс | Назначение | Аутентификация | Формат ошибок |
 |---|---|---|---|
-| `/api/login`, `/api/login-options`, `/api/heartbeat`, `/api/sysinfo*` | контракт RustDesk-клиента | нет by design | `{"error": ...}` / `text/plain` |
+| `/api/login`, `/api/login-options`, `/api/heartbeat`, `/api/sysinfo*`, `/api/audit/{conn,file,alarm}` | контракт RustDesk-клиента | нет by design | `{"error": ...}` / `text/plain` |
 | `/api/ab/*`, `/api/currentUser`, `/api/logout` | RustDesk Address Book | Bearer (кроме logout) | `{"error": ...}` |
 | `/api/v1/*` | внутренний API SPA | Bearer | `{"detail": ...}` |
 | `/panel/*` | legacy HTML-панель | cookie `session` | HTML/redirect 303 |
@@ -52,6 +52,7 @@
 | `/api/heartbeat` | 20/мин на устройство (ключ `id` + IP) | `HEARTBEAT_PER_MINUTE_PER_DEVICE` |
 | `/api/heartbeat` | 6000/мин суммарно на IP (защита от флуда) | `HEARTBEAT_PER_MINUTE_PER_IP` |
 | `/api/sysinfo` | 6000/мин на IP (агрегатный потолок) | `SYSINFO_PER_MINUTE_PER_IP` |
+| `/api/audit/*` | 600/мин на IP; тело ≤16 KiB | `AUDIT_REPORT_PER_MINUTE_PER_IP`, `rustdesk.audit_report` |
 | bulk ids | 500 уникальных | `MAX_BULK_IDS` |
 | bulk tags | 20 имён, длина ≤64 | `MAX_BULK_TAGS` |
 | `page_size` в `/api/v1` | 1…200 | `list_entries`, `list_discovered` |
@@ -337,7 +338,56 @@ CPU/RAM/OS консервативный: не распознал — поле п
 threadpool со своей сессией, чтобы первый старт парка не блокировал event
 loop.
 
-### 2.16. Legacy-заглушки
+### 2.16. `POST /api/audit/{conn|file|alarm}` — отчёты устройства о подключениях
+
+Штатный клиент шлёт их **с устройства, к которому подключились**, если задан
+`api-server` (`src/server/connection.rs`: `post_conn_audit`,
+`post_file_audit`, `post_alarm_audit`). Без токена (by design), как
+heartbeat/sysinfo. До 2026-11-01 маршрута не было и клиент получал `404`
+(ERR-018).
+
+Тело `conn` — по одному запросу на этап соединения; в каждом есть `id`
+(отчитывающееся устройство), `uuid`, `conn_id`, `session_id`, в новых
+клиентах — уникальный `nonce`:
+
+```json
+{"action":"new","ip":"203.0.113.10", ...}                        // TCP принят
+{"peer":["<id подключающегося>","<имя>"],"type":0,"primary_auth":3, ...}  // вход прошёл
+{"action":"close", ...}                                           // завершено
+```
+
+`type`: 0 — удалённое управление, 1 — файлы, 2 — проброс портов, 3 — камера,
+4 — терминал. Имя — `display_name`/`name` из нашего `/api/login` (каждое
+слово с заглавной) или имя пользователя ОС, если клиент не вошёл.
+
+`file`: `peer_id`, `type` (0 — с устройства, 1 — на устройство), `path`,
+`info` — JSON-строка с `ip`, `name`, `num`, `files` (до 10 пар
+`[имя, размер]`). `alarm`: `typ` (0 IP whitelist, 1 >30 попыток, 2 — 6
+попыток за минуту, 6 IPv6-префикс, 7/8 вход в терминал, 9 нарушение области
+сеанса, 10 ID whitelist), `info` — JSON-строка с `ip`, `id`, `name`.
+
+Ответы:
+
+| Ситуация | Ответ |
+|---|---|
+| принято (в т. ч. повтор с тем же `nonce`, `AUDIT_ENABLED=0`, этап `new`) | `200`, **пустое тело** — клиент считает отчёт сохранённым только так |
+| не объект JSON / неверный `id` / неизвестный этап | `400 {"error": ...}` — клиент не повторяет |
+| неизвестный `{kind}` | `404` |
+| тело >16 KiB | `413` |
+| лимит | `429` + `Retry-After` — клиент повторяет до ~2 мин |
+| ошибка записи в БД | `500` — клиент повторяет; `nonce` запоминается только после commit |
+
+Что пишется в `audit_events` (`observed: "device_report"`): `connection.established`
+и `connection.closed` (с `duration_sec`), `connection.file_transfer`,
+`security.client_alarm` (`outcome=denied`). Соединение без успешного входа
+строки не даёт. Пользователь: вход в API с ID подключающегося
+(`actor_source=session`), иначе ровно один активный пользователь с таким
+`display_name`/`username` без учёта регистра (`reported_name`), иначе
+владелец личной книги (`book_owner`), иначе устройство. Access-строк для этих
+маршрутов нет. Состояние соединений и `nonce` — в памяти процесса: после
+рестарта `close` для ранее открытого соединения строки не даёт.
+
+### 2.17. Legacy-заглушки
 
 | Метод | Путь | Ответ |
 |---|---|---|

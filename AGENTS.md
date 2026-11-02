@@ -56,9 +56,9 @@ audit-журнала. Одна SQLite-БД (по умолчанию `data/base.d
 4. **Одна БД, Alembic — единственный способ менять схему.** Не удаляй,
    не пересоздавай и не «чини» рабочую БД. Не меняй `alembic_version`
    вручную. Новая миграция должна быть в git: Docker/клон собирают только
-   закоммиченные файлы. **Фактическое состояние:** `Dockerfile`,
-   `docker-compose.yml` и `.dockerignore` сейчас в `.gitignore`; не обещай
-   Docker-деплой с чистого клона, пока это не исправлено.
+   закоммиченные файлы. Docker-файлы в git (`docs/development/WORKFLOW.md`
+   §4); `.dockerignore` — allow-list, новый каталог, нужный в рантайме,
+   надо явно добавить и в него, и в `COPY`.
 5. **Шим — отдельный сетевой компонент.** `SHIM_LISTEN` — адрес bind,
    `SHIM_UPSTREAM` — rendezvous-порт настоящего `hbbs` (не relay `21117`),
    `SHIM_ID_KEY` — приватный 64-байтный `id_ed25519`. Шим не аутентифицирует
@@ -178,8 +178,8 @@ cd frontend && npm run build && npm run lint
 - Не отключай проверки ради удобства. TLS terminates на прокси; приложение
   само по себе отдаёт HTTP.
 - Панель и API не должны быть публичными без явного решения владельца.
-  `/api/sysinfo`, `/api/heartbeat`, `/api/login-options` неаутентифицированы
-  by design — это не повод добавлять туда доверенные данные.
+  `/api/sysinfo`, `/api/heartbeat`, `/api/login-options`, `/api/audit/*`
+  неаутентифицированы by design — это не повод добавлять туда доверенные данные.
 - Не доверяй `X-Forwarded-For`, если прямой peer не входит в
   `TRUSTED_PROXIES`.
 - Не раскрывай traceback, пути, SQL и секреты в ответах.
