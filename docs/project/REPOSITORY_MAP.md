@@ -149,6 +149,7 @@
 | `scripts/docker-entrypoint.sh` | генерация/переиспользование `DEVICE_SECRET`/`WEB_SECRET` | путь `/app/data/.secrets.env` |
 | `scripts/dump_ab.py` | экспорт книг из RustDesk Pro/совместимого API | сеть, токен; есть redaction |
 | `scripts/repro_handshake.py` | диагностика secure/plain этапов против `hbbs` | нужен protobuf и живой сервер |
+| `scripts/hbbs_unblock.py` | снимает блокировку регистраций по IP в `hbbs` (ERR-022); в образе как `/usr/local/bin/hbbs_unblock.py` для агента RustDesk Manager | WORKFLOW §7.1, SEC-029 |
 | `scripts/check_keys.py` | отпечатки `id_ed25519.pub` vs client Key | не печатает приватные ключи |
 | `scripts/rendezvous_pb2.py` | копия protobuf для диагностики | синхронизировать с `app/shim/rendezvous_pb2.py` |
 

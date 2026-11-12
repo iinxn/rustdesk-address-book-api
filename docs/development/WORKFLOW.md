@@ -120,17 +120,27 @@ npm run lint     # oxlint
 
 ### 4.1. Образ
 
-- Stage 1 (`node:22-slim`, всегда на платформе сборщика) собирает SPA;
-  stage 2 — `python:3.13-slim`, ставит только `requirements.txt`
-  (dev/audit-инструменты — в `requirements-dev.txt`).
+- Stage 1 (`node:22-slim`) собирает SPA; stage 2 — `python:3.13-slim-trixie`
+  (релиз Debian закреплён, переход на следующий — осознанное изменение),
+  ставит только `requirements.txt` (dev/audit-инструменты — в
+  `requirements-dev.txt`).
+- Dockerfile собирается и BuildKit, и старым сборщиком (`DOCKER_BUILDKIT=0`,
+  старый Docker, `docker-compose` v1): без `# syntax=`, `--platform=$BUILDPLATFORM`,
+  `RUN --mount`, `COPY --chmod`/heredoc (ERR-021). Не добавляй их без
+  необходимости.
+- Запуск образа требует Docker ≥ 20.10.10: в Debian 13 glibc вызывает
+  `clone3`, а старый seccomp-профиль Docker его запрещает, и потоки не
+  создаются (`Operation not permitted`). На более старом Docker — обновить
+  Docker; ослаблять seccomp не нужно (требует проверки на таком хосте).
 - `.dockerignore` — allow-list: в контекст сборки попадают только `app/`,
   `alembic/`, `alembic.ini`, `requirements.txt`, `frontend/` (без
   `node_modules`/`dist`) и entrypoint. `.env`, `data/`, `keys/`, `*.db`,
   `.git` в образ и даже в контекст не попадают.
 - Код принадлежит root и только читается; процесс работает как `appuser`
+  (`USER 1000:1000` — числом, чтобы non-root был виден без `/etc/passwd`)
   UID/GID 1000 и пишет только в `/app/data` (volume). Байткод собран при
   сборке.
-- В образе заданы контейнерные значения `HOST=0.0.0.0`, `PORT=8000`,
+- В образе заданы контейнерные значения `HOST=0.0.0.0`, `PORT=21114`,
   `SHIM_LISTEN=0.0.0.0:21116`, `SHIM_ID_KEY=/app/keys/id_ed25519`.
 - `HEALTHCHECK` опрашивает `/health/ready` на `$PORT`.
 - Entrypoint: проверяет, что `/app/data` доступен на запись (иначе понятная
@@ -151,8 +161,8 @@ cp /path/to/hbbs-id_ed25519 keys/id_ed25519 && chmod 600 keys/id_ed25519
 
 docker compose up -d --build    # с Docker Hub: image: <user>/...; docker compose pull
 docker compose logs -f app      # ждать "migrations ok"
-curl -s http://127.0.0.1:8000/health/ready
-docker compose exec app python -m app.cli create-admin
+curl -s http://127.0.0.1:21114/health/ready
+docker compose exec app docker-entrypoint.sh python -m app.cli create-admin
 ```
 
 Что происходит при `docker compose up -d`:
@@ -174,9 +184,14 @@ docker compose exec app python -m app.cli create-admin
 
 Что ещё задаёт `docker-compose.yml`:
 
-- Порты: `8000:8000` и `21116:21116` **TCP и UDP** (клиент использует оба).
-  За прокси на том же хосте — `"127.0.0.1:8000:8000"`; клиенту с пустым
-  `api-server` нужен `"21114:8000"` (ERR-009). Меняется только сторона хоста.
+- Порты: `21114:21114` и `21116:21116` **TCP и UDP** (клиент использует оба).
+  `21114` — порт, на котором клиент с пустым `api-server` ищет API (ERR-009).
+  За прокси на том же хосте — `"127.0.0.1:21114:21114"`. Меняется только
+  сторона хоста.
+- Разовые CLI-команды запускай через entrypoint
+  (`docker compose exec app docker-entrypoint.sh python -m app.cli …`):
+  `exec` его обходит, и без этого автосгенерированные секреты из
+  `data/.secrets.env` не подгружаются (`FATAL: DEVICE_SECRET is not set`).
 - `extra_hosts: host.docker.internal:host-gateway` — для hbbs на том же
   хосте (`SHIM_UPSTREAM=host.docker.internal:21166`). `127.0.0.1` внутри
   контейнера — это сам контейнер, а не хост.
@@ -218,7 +233,7 @@ docker compose exec app python -m app.cli create-admin
 ### 4.4. Обновление
 
 ```bash
-docker compose exec app python -m app.cli backup   # или копия data/ при остановленном контейнере
+docker compose exec app docker-entrypoint.sh python -m app.cli backup   # или копия data/ при остановленном контейнере
 docker compose pull   # для готового образа; для локального — up --build
 docker compose up -d
 docker compose logs -f app   # миграции применяются при старте
@@ -231,13 +246,17 @@ docker login
 docker buildx create --use --name multi   # один раз
 docker buildx build --platform linux/amd64,linux/arm64 \
   --build-arg VERSION=1.0.0 --build-arg REVISION="$(git rev-parse --short HEAD)" \
-  -t <user>/rustdesk-ab-backend:1.0.0 -t <user>/rustdesk-ab-backend:latest \
+  -t <user>/rustdesk-manager:1.0.0 -t <user>/rustdesk-manager:latest \
   --push .
 ```
 
+Для чужой архитектуры (arm64 на amd64) buildx выполняет оба этапа, включая
+`npm ci`, под эмуляцией QEMU: это медленно, но результат тот же. На хосте без
+QEMU один раз: `docker run --privileged --rm tonistiigi/binfmt --install arm64`.
+
 Собирай из чистого клона или проверь `git status`: образ берёт файлы из
 рабочего каталога, включая незакоммиченные (ERR-005). На сервере достаточно
-`docker-compose.yml` с `image: <user>/rustdesk-ab-backend:1.0.0` (и при
+`docker-compose.yml` с `image: <user>/rustdesk-manager:1.0.0` (и при
 желании `.env` с секретами); `build: .` при наличии образа не используется. Проверка содержимого образа:
 `docker run --rm --entrypoint ls <image> /app/alembic/versions`.
 
@@ -320,6 +339,60 @@ ss -ulnp | grep 21116
 
 Скрипт печатает только хеши, не ключи. Диагностика протокола:
 `scripts/repro_handshake.py` (нужен живой `hbbs` и protobuf).
+
+### 7.1. Лимит регистраций в `hbbs`
+
+`hbbs` блокирует регистрацию новых ID с IP, который превысил лимит (ERR-022).
+Агент RustDesk Manager (`scripts/hbbs_unblock.py`, только стандартная
+библиотека) снимает блокировку командой `hbbs` `ib <ip> -`. Команды `hbbs`
+принимаются только с loopback на порт `21115`, а в образе `hbbs` нет
+оболочки, поэтому агент работает внутри сетевого пространства `hbbs`.
+
+Отдельный контейнер
+`rustdesk-manager-agent` рядом с `hbbs`. Файл лежит в образе бэкенда
+(`/usr/local/bin/hbbs_unblock.py`). Добавь сервис в тот же compose, где `hbbs`
+(в `docker-compose.yml` проекта этот блок есть закомментированным):
+
+```yaml
+  rustdesk-manager-agent:
+    image: <образ бэкенда>
+    network_mode: "service:hbbs"   # loopback hbbs; порты не нужны
+    entrypoint: ["python", "/usr/local/bin/hbbs_unblock.py"]
+    environment:
+      # Как часто сбрасывать: 3600, 90s, 30m, 1h (не меньше 60 с).
+      HBBS_UNBLOCK_INTERVAL: "1h"
+      # CLEAR_ALL: "1"   # очищать все IP, не только заблокированные
+      # DRY_RUN: "1"     # только показывать
+    depends_on: [hbbs]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      disable: true   # healthcheck образа проверяет API, его здесь нет
+```
+
+Секреты и тома агенту не нужны, `docker-entrypoint.sh` не вызывается.
+Если `hbbs` не отвечает, процесс завершается с ошибкой, и Docker его
+перезапускает. После `docker restart hbbs` агент восстанавливается сам
+(проверено). Если пересоздать только `hbbs`
+(`docker compose up -d --force-recreate hbbs`), агент ссылается на старый
+контейнер и остаётся в `exited`. Чини обычным `docker compose up -d` без
+имени сервиса: compose пересоздаст агента (проверено). Смотреть работу:
+`docker compose logs rustdesk-manager-agent`.
+
+Разовый проход без ожидания таймера (флаг важнее переменной окружения):
+
+```bash
+# посмотреть, кто заблокирован, ничего не меняя
+docker compose run --rm -e DRY_RUN=1 rustdesk-manager-agent --interval 0
+# снять блокировку сейчас
+docker compose run --rm rustdesk-manager-agent --interval 0
+```
+
+`CLEAR_ALL=1` очищает все отслеживаемые IP. Агент печатает IP и счётчики,
+секретов в выводе нет. Ослабляет защиту `hbbs` (SEC-029). Сначала стоит
+устранить общий адрес (ERR-022, «Что делать»).
 
 ## 8. Диагностика
 

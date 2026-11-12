@@ -7,8 +7,8 @@
 #   mkdir -p data keys
 #   docker compose up -d --build        # or `docker compose pull` for a Docker Hub image
 #   docker compose logs -f app          # wait for "migrations ok"
-#   docker compose exec app python -m app.cli create-admin
-#   open http://<server>:8000/app/
+#   docker compose exec app docker-entrypoint.sh python -m app.cli create-admin
+#   open http://<server>:21114/app/
 #
 # Notes on values:
 #   * Quote every value ("..."); a literal "$" must be written as "$$".
@@ -21,18 +21,18 @@
 services:
   app:
     # Local build from this repository. To run the published image instead,
-    # replace with e.g. <dockerhub-user>/rustdesk-ab-backend:1.0.0
-    image: rustdesk-ab-backend:local
+    # replace with e.g. <dockerhub-user>/rustdesk-manager:1.0.0
+    image: rustdesk-manager:local
     build: .
     restart: unless-stopped
 
     ports:
       # "<host address:>host port:container port". Change only the host side;
-      # the container listens on 8000 and 21116.
-      # API + web panel (plain HTTP). Behind a reverse proxy on this host:
-      # "127.0.0.1:8000:8000". Client with an empty api-server setting looks
-      # for the API on 21114: "21114:8000".
-      - "8000:8000"
+      # the container listens on 21114 and 21116.
+      # API + web panel (plain HTTP). 21114 is where a client with an empty
+      # api-server setting looks for the API. Behind a reverse proxy on this
+      # host: "127.0.0.1:21114:21114".
+      - "21114:21114"
       # KX shim. The RustDesk client uses BOTH TCP and UDP on 21116.
       - "21116:21116/tcp"
       - "21116:21116/udp"
@@ -127,3 +127,27 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
+
+  # -------------------------------------------- rustdesk-manager-agent --
+  # RustDesk Manager agent. Uncomment ONLY if hbbs runs in THIS compose
+  # file as a service named `hbbs`. Clears hbbs's per-IP registration
+  # limit, so new devices behind one address stop getting "ID doesn't
+  # exist" (ERR-022, SEC-029, docs/development/WORKFLOW.md §7.1). Same
+  # image as `app`, no ports, volumes or secrets.
+  # rustdesk-manager-agent:
+  #   image: rustdesk-manager:local
+  #   network_mode: "service:hbbs"   # hbbs takes commands only from its loopback
+  #   entrypoint: ["python", "/usr/local/bin/hbbs_unblock.py"]
+  #   depends_on: [hbbs]
+  #   restart: unless-stopped
+  #   read_only: true
+  #   cap_drop: [ALL]
+  #   security_opt:
+  #     - no-new-privileges:true
+  #   healthcheck:
+  #     disable: true   # the image's check targets the API, which is not here
+  #   environment:
+  #     # How often to clear: 3600, 90s, 30m, 1h (at least 60 s).
+  #     HBBS_UNBLOCK_INTERVAL: "1h"
+  #     # CLEAR_ALL: "1"   # clear every tracked IP, not only blocked ones
+  #     # DRY_RUN: "1"     # only print, clear nothing

@@ -183,19 +183,21 @@ mkdir -p data keys
 cp /path/to/hbbs-id_ed25519 keys/id_ed25519 && chmod 600 keys/id_ed25519  # only if SHIM_ENABLED=1
 docker compose up -d --build
 docker compose logs -f app           # expect "migrations ok"
-curl http://127.0.0.1:8000/health/ready
-docker compose exec app python -m app.cli create-admin
+curl http://127.0.0.1:21114/health/ready
+docker compose exec app docker-entrypoint.sh python -m app.cli create-admin
 ```
 
 - `DEVICE_SECRET`/`WEB_SECRET` come from a `.env` next to the compose file,
   or are generated on first start and saved in `data/.secrets.env`
   (mode 600). Keep that file: a new `DEVICE_SECRET` makes stored device
   passwords unreadable.
-- Ports `8000` (API + panel) and `21116` TCP **and** UDP (shim). Behind a
-  reverse proxy on the same host publish `"127.0.0.1:8000:8000"`.
+- Ports `21114` (API + panel) and `21116` TCP **and** UDP (shim). Behind a
+  reverse proxy on the same host publish `"127.0.0.1:21114:21114"`.
+- One-off CLI commands go through the entrypoint so that generated secrets
+  are loaded: `docker compose exec app docker-entrypoint.sh python -m app.cli …`.
 - hbbs on the Docker host: `SHIM_UPSTREAM: "host.docker.internal:21166"`.
 - `./data` must be writable by UID 1000, otherwise set `user: "UID:GID"`.
-- Prebuilt image: set `image: <user>/rustdesk-ab-backend:<tag>`, then
+- Prebuilt image: set `image: <user>/rustdesk-manager:<tag>`, then
   `docker compose pull && docker compose up -d`.
 
 Stop keeps data: `docker compose down`. Startup sequence, upgrades, moving a
@@ -247,7 +249,7 @@ the full list.
 | `AUDIT_READ_DEDUPE_SEC` | no (`300`) | int, s | Repeated reads collapse into one access entry | — |
 | `APP_NAME` | no (`RustDesk API`) | string | FastAPI title | — |
 
-In the Docker image `HOST=0.0.0.0`, `PORT=8000`, `SHIM_LISTEN=0.0.0.0:21116`
+In the Docker image `HOST=0.0.0.0`, `PORT=21114`, `SHIM_LISTEN=0.0.0.0:21116`
 and `SHIM_ID_KEY=/app/keys/id_ed25519` are preset; `docker-compose.yml`
 lists only the settings that depend on the installation. Any other variable
 from this table can be added to its `environment:` block.

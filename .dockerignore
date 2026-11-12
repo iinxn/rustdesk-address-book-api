@@ -9,6 +9,7 @@
 !alembic/
 !app/
 !scripts/docker-entrypoint.sh
+!scripts/hbbs_unblock.py
 !frontend/
 
 # Re-excluded inside the allowed directories.
